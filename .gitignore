@@ -1,0 +1,24 @@
+node_modules
+dist
+dist-ssr
+src-tauri/target
+src-tauri/gen
+*.local
+.DS_Store
+
+# Local credentials and runtime data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+.codex/
+.agents/
+.vscode/
+.idea/
+/exports/
+/backups/
+/src-tauri/target-*/

@@ -1,0 +1,26 @@
+[
+  {
+    "bookSourceName": "本地测试书源 A",
+    "bookSourceUrl": "http://127.0.0.1:1422/a",
+    "bookSourceGroup": "本地教学示例",
+    "bookSourceType": 0,
+    "enabled": true,
+    "bookSourceComment": "配合项目中的 node scripts/fixture-server.mjs 使用，仅含本地生成的示例小说。",
+    "searchUrl": "http://127.0.0.1:1422/a/search",
+    "ruleSearch": {
+      "bookList": ".book",
+      "name": "a@text",
+      "author": ".author@text",
+      "bookUrl": "a@href",
+      "intro": ".intro@text"
+    },
+    "ruleToc": {
+      "chapterList": "a.chapter",
+      "chapterName": "@text",
+      "chapterUrl": "@href"
+    },
+    "ruleContent": {
+      "content": "#body"
+    }
+  }
+]

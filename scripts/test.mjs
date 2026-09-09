@@ -1,0 +1,317 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { test } from 'node:test';
+import { JSDOM } from 'jsdom';
+import { createServer } from 'vite';
+
+const dom = new JSDOM('<div id="test-root"></div>', { url: 'https://test.invalid/', pretendToBeVisual: true });
+for (const key of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement', 'Node', 'DOMParser', 'XPathResult', 'localStorage']) {
+  globalThis[key] = dom.window[key];
+}
+globalThis.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
+const { default: vuePlugin } = await import('@vitejs/plugin-vue');
+const server = await createServer({ configFile: false, plugins: [vuePlugin()], server: { middlewareMode: true, watch: null }, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] } });
+const load = (path) => server.ssrLoadModule(`/src/${path}`);
+const { createApp, nextTick, ssrContextKey } = await import('vue');
+const { createPinia, setActivePinia } = await import('pinia');
+const engine = await load('engine/source.ts');
+const http = await load('engine/http.ts');
+const rule = await load('engine/rule.ts');
+const storage = await load('services/storage.ts');
+const { useLibraryStore } = await load('stores/library.ts');
+const { useSourcesStore } = await load('stores/sources.ts');
+const { useUiStore } = await load('stores/ui.ts');
+const { matchChapter } = await load('services/reading.ts');
+
+const source = (name) => ({ bookSourceName: name, bookSourceUrl: `https://${name}.invalid`, searchUrl: '/search', ruleSearch: { bookList: '.book', name: 'a@text', author: '.author@text', bookUrl: 'a@href' }, ruleToc: { chapterList: 'a', chapterName: '@text', chapterUrl: '@href' }, ruleContent: { content: '#body' } });
+const result = (s) => ({ name: 'Example', author: 'Author', bookUrl: `${s.bookSourceUrl}/book`, source: s, coverUrl: '', intro: '', kind: '' });
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+async function until(predicate) {
+  for (let i = 0; i < 100; i++) { if (predicate()) return; await tick(); }
+  assert.fail('Timed out waiting for component state');
+}
+function freshStores() {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  return { pinia, library: useLibraryStore(), sources: useSourcesStore(), ui: useUiStore() };
+}
+async function mount(path, pinia) {
+  const component = (await load(path)).default;
+  // Use the real SFC setup/lifecycle with a minimal render for deterministic state tests.
+  const app = createApp({ ...component, render: () => null });
+  app.use(pinia);
+  app.provide(ssrContextKey, { modules: new Set() });
+  const host = document.createElement('div'); document.body.append(host);
+  const vm = app.mount(host);
+  return { state: vm.$.setupState, unmount: () => { app.unmount(); host.remove(); } };
+}
+
+try {
+  await test('native saved exit has destroy permission and uses direct destruction', async () => {
+    const caps = JSON.parse(await readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'));
+    assert.ok(caps.permissions.includes('core:window:allow-destroy'));
+    const tray = await readFile(new URL('../src/services/tray.ts', import.meta.url), 'utf8');
+    assert.match(tray, /close: \(\) => win\.destroy\(\)/);
+  });
+  await test('tray close hides, explicit quit saves once before closing', async () => {
+    const { createWindowCloseController } = await load('services/windowClose.ts');
+    const calls = [];
+    let resolveSave;
+    const c = createWindowCloseController({
+      trayOnly: () => true,
+      hide: async () => { calls.push('hide'); },
+      save: () => new Promise(resolve => { calls.push('save'); resolveSave = resolve; }),
+      close: async () => { calls.push('close'); c.onCloseRequested({ preventDefault: () => calls.push('prevent-again') }); },
+      failed: async () => { calls.push('failed'); },
+    });
+    await c.onCloseRequested({ preventDefault: () => calls.push('prevent') });
+    assert.deepEqual(calls, ['prevent', 'hide']);
+    const quitting = c.request(true);
+    await c.request(true);
+    assert.deepEqual(calls, ['prevent', 'hide', 'save']);
+    resolveSave(); await quitting;
+    assert.deepEqual(calls, ['prevent', 'hide', 'save', 'close']);
+  });
+  await test('failed save keeps window open and allows a later exit retry', async () => {
+    const { createWindowCloseController } = await load('services/windowClose.ts');
+    let fail = true, closes = 0, errors = 0;
+    const c = createWindowCloseController({
+      trayOnly: () => false, hide: async () => assert.fail('unexpected hide'),
+      save: async () => { if (fail) throw new Error('disk full'); },
+      close: async () => { closes++; }, failed: async () => { errors++; },
+    });
+    await c.request();
+    assert.equal(closes, 0); assert.equal(errors, 1);
+    fail = false; await c.request(); assert.equal(closes, 1);
+  });
+  await test('search incrementally groups duplicates while retaining selectable sources', async () => {
+    window.fetch = async () => new Response('<div class="book"><a href="/book">Example</a><span class="author">Author</span></div>');
+    let displayed = [];
+    const r = await engine.searchAll([source('a'), source('b')], 'Example', (_, all) => { displayed = all; });
+    assert.equal(displayed.length, 1);
+    assert.equal(r.results.length, 1);
+    assert.equal(displayed[0].alternatives.length, 2);
+  });
+  await test('cancelling a search aborts active requests and does not start queued sources', async () => {
+    let started = 0;
+    const signals = [];
+    window.fetch = (_url, options) => { started++; signals.push(options.signal); return new Promise(() => {}); };
+    const controller = new AbortController();
+    const promise = engine.searchAll(Array.from({ length: 10 }, (_, i) => source(`cancel${i}`)), 'Example', undefined, undefined, controller.signal);
+    await until(() => started === 4);
+    controller.abort();
+    await assert.rejects(promise, { name: 'AbortError' });
+    assert.equal(started, 4);
+    assert.ok(signals.every((s) => s.aborted));
+  });
+  await test('HTTP status errors, timeout and already aborted requests reject cleanly', async () => {
+    window.fetch = async () => new Response('Unavailable', { status: 503 });
+    await assert.rejects(http.fetchText('https://http.invalid/fail'), /503/);
+    window.fetch = () => new Promise(() => {});
+    await assert.rejects(http.fetchText('https://http.invalid/slow', { timeoutMs: 10 }), /超时/);
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(http.fetchText('https://http.invalid/abort', { signal: controller.signal }), { name: 'AbortError' });
+  });
+  await test('empty content is retried, successful cache is used, forced retry bypasses cache', async () => {
+    let requests = 0;
+    window.fetch = async () => { requests++; return new Response(requests === 1 ? '<div></div>' : `<div id="body">text ${requests}</div>`); };
+    const s = source('retry');
+    await assert.rejects(engine.getContent(s, `${s.bookSourceUrl}/chapter`), /正文为空/);
+    assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'text 2');
+    assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'text 2');
+    assert.equal(requests, 2);
+    assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`, undefined, { force: true }), 'text 3');
+  });
+  await test('content replacement applies to list rules and cache respects rule changes', async () => {
+    const ctx = { baseUrl: 'https://rules.invalid', doc: new DOMParser().parseFromString('<div id="body">hello AD world</div>', 'text/html') };
+    assert.deepEqual(await rule.evalRuleList('#body@text##AD##', ctx), ['hello  world']);
+    window.fetch = async () => new Response('<div id="body">old</div><div id="new">new</div>');
+    const s = source('rulecache');
+    assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'old');
+    s.ruleContent.content = '#new';
+    assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'new');
+  });
+  await test('chapter matching accepts formatting differences and rejects ambiguous titles', () => {
+    assert.equal(matchChapter([{ title: '第１章： 初见', url: 'a' }], '第1章 初见'), 0);
+    assert.equal(matchChapter([{ title: '序章', url: 'a' }, { title: '序章', url: 'b' }], '序章'), -1);
+    assert.equal(matchChapter([{ title: '第一章', url: 'a' }], ''), -1);
+  });
+  await test('group identity stays stable when selecting a source with a book-name suffix', () => {
+    const a = result(source('edition-a'));
+    const b = { ...result(source('edition-b')), name: 'Example (Complete)' };
+    const groups = engine.dedupeResults([a, b]);
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].alternatives.length, 2);
+    assert.equal(engine.searchResultKey(a), engine.searchResultKey(b));
+  });
+  await test('flushing writes newest snapshot and recovers corrupted JSON from backup', async () => {
+    await storage.writeJson('test-save.json', { version: 1 });
+    storage.writeJsonDebounced('test-save.json', { version: 2 }, 60000);
+    storage.writeJsonDebounced('test-save.json', { version: 3 }, 60000);
+    await storage.flushStorage();
+    assert.deepEqual(await storage.readJson('test-save.json', null), { version: 3 });
+    localStorage.setItem('toudu:test-save.json', '{broken');
+    assert.deepEqual(await storage.readJson('test-save.json', null), { version: 1 });
+  });
+  await test('failed writes stay retryable and clear the error once saved', async () => {
+    const original = dom.window.Storage.prototype.setItem;
+    dom.window.Storage.prototype.setItem = function () { throw new Error('Disk full'); };
+    try {
+      storage.writeJsonDebounced('retry-save.json', { value: 42 }, 60000);
+      await assert.rejects(storage.flushStorage(), /Disk full/);
+      assert.match(storage.storageStatus.error, /保存失败/);
+    } finally { dom.window.Storage.prototype.setItem = original; }
+    await storage.flushStorage();
+    assert.deepEqual(await storage.readJson('retry-save.json', null), { value: 42 });
+    assert.equal(storage.storageStatus.error, '');
+  });
+  await test('source switching preserves book identity and matches progress without adding a book', async () => {
+    const { library } = freshStores();
+    const b = library.addFromSearch(result(source('original')));
+    const id = b.id;
+    const chapters = [{ title: 'First', url: 'https://replacement.invalid/1' }, { title: 'Second', url: 'https://replacement.invalid/2' }];
+    await library.changeSource(b, result(source('replacement')), 'https://replacement.invalid/toc', chapters, 1);
+    assert.equal(library.books.length, 1);
+    assert.equal(b.id, id);
+    assert.equal(b.progress.chapterIndex, 1);
+    assert.equal(b.progress.chapterTitle, 'Second');
+    assert.equal(b.sourceUrl, 'https://replacement.invalid');
+  });
+  await test('a cached TOC from a different source is ignored after a partial save', async () => {
+    const { library } = freshStores();
+    const b = library.addFromSearch(result(source('toc-original')));
+    await storage.writeJson(`toc_${b.id}.json`, { sourceUrl: 'https://different.invalid', bookUrl: b.bookUrl, chapters: [{ title: 'Wrong source', url: 'https://different.invalid/1' }] });
+    assert.equal(await library.getToc(b), null);
+  });
+  await test('unmatched source chapters require selection, failed source loading preserves the original', async () => {
+    const { pinia, library, ui } = freshStores();
+    const b = library.addFromSearch(result(source('switch-old')));
+    b.progress = { chapterIndex: 1, chapterTitle: 'Original title' }; b.lastReadTime = 1;
+    ui.openSearch('', b.id);
+    const overlay = await mount('views/SearchOverlay.vue', pinia);
+    try {
+      window.fetch = async () => new Response('Unavailable', { status: 503 });
+      await overlay.state.read(result(source('switch-failed')));
+      assert.equal(b.sourceUrl, 'https://switch-old.invalid');
+      assert.match(overlay.state.switchError, /503/);
+      window.fetch = async () => new Response('<a href="/chapter/1">New first</a><a href="/chapter/2">New second</a>');
+      await overlay.state.read(result(source('switch-new')));
+      assert.ok(overlay.state.prepared);
+      assert.equal(b.sourceUrl, 'https://switch-old.invalid');
+      overlay.state.selectedChapter = 1;
+      await overlay.state.commitSource();
+      assert.equal(b.sourceUrl, 'https://switch-new.invalid');
+      assert.equal(b.progress.chapterTitle, 'New second');
+      assert.equal(library.books.length, 1);
+    } finally { overlay.unmount(); }
+  });
+  await test('reader discards late chapters and never advances progress after a failed load', async () => {
+    const { pinia, library, sources, ui } = freshStores();
+    const s = source('reader-race'); sources.list = [s];
+    const b = library.addFromSearch(result(s));
+    const chapters = [{ title: 'A', url: `${s.bookSourceUrl}/a` }, { title: 'B', url: `${s.bookSourceUrl}/b` }];
+    library.tocCache[b.id] = chapters;
+    ui.openBook(b.id);
+    const pending = new Map();
+    window.fetch = (url) => new Promise((resolve) => { pending.set(url, resolve); });
+    const reader = await mount('views/ReaderView.vue', pinia);
+    try {
+      await until(() => pending.has(chapters[0].url));
+      const a = pending.get(chapters[0].url);
+      const switching = reader.state.loadChapter(1);
+      await until(() => pending.has(chapters[1].url));
+      pending.get(chapters[1].url)(new Response('<div id="body">chapter B</div>'));
+      await switching;
+      a(new Response('<div id="body">chapter A</div>'));
+      await tick();
+      assert.equal(reader.state.idx, 1);
+      assert.equal(reader.state.content, 'chapter B');
+      assert.equal(library.byId(b.id).progress.chapterIndex, 1);
+      window.fetch = async () => new Response('Failure', { status: 503 });
+      await reader.state.loadChapter(0, true);
+      assert.match(reader.state.loadError, /503/);
+      assert.equal(library.byId(b.id).progress.chapterIndex, 1);
+    } finally { reader.unmount(); }
+  });
+  await test('reader ignores shortcuts in overlays and editable fields; Escape closes TOC first', async () => {
+    const { pinia, library, sources, ui } = freshStores();
+    const s = source('keys'); sources.list = [s]; const b = library.addFromSearch(result(s));
+    library.tocCache[b.id] = [{ title: 'A', url: `${s.bookSourceUrl}/a` }]; ui.openBook(b.id);
+    window.fetch = async () => new Response('<div id="body">A</div>');
+    const reader = await mount('views/ReaderView.vue', pinia);
+    try {
+      await until(() => reader.state.content === 'A');
+      ui.searchOpen = true;
+      window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      assert.equal(ui.readingId, b.id);
+      ui.searchOpen = false;
+      const input = document.createElement('input'); document.body.append(input);
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      assert.equal(ui.readingId, b.id); input.remove();
+      reader.state.showToc = true;
+      window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      assert.equal(reader.state.showToc, false);
+      assert.equal(ui.readingId, b.id);
+    } finally { reader.unmount(); }
+  });
+  await test('Escape in settings closes only settings while a book remains open', async () => {
+    const { pinia, library, sources, ui } = freshStores();
+    const s = source('settings-keys'); sources.list = [s]; const b = library.addFromSearch(result(s));
+    library.tocCache[b.id] = [{ title: 'A', url: `${s.bookSourceUrl}/a` }]; ui.openBook(b.id);
+    window.fetch = async () => new Response('<div id="body">A</div>');
+    const reader = await mount('views/ReaderView.vue', pinia);
+    ui.openPanel('appearance');
+    const settings = await mount('views/SettingsPanel.vue', pinia);
+    try {
+      window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
+      assert.equal(ui.panelOpen, false);
+      assert.equal(ui.readingId, b.id);
+    } finally { settings.unmount(); reader.unmount(); }
+  });
+  await test('real tray bridge restores, hides taskbar and closes through granted APIs', async () => {
+    const { mockIPC, mockWindows, clearMocks } = await import('@tauri-apps/api/mocks');
+    const { emit } = await import('@tauri-apps/api/event');
+    const { useSettingsStore } = await load('stores/settings.ts');
+    const { initializeTray } = await load('services/tray.ts');
+    const { ui } = freshStores();
+    const settings = useSettingsStore();
+    settings.trayOnly = true;
+    const caps = JSON.parse(await readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'));
+    const calls = [];
+    let items;
+    const oldEvent = globalThis.Event;
+    globalThis.Event = window.Event;
+    mockWindows('main');
+    mockIPC((cmd, payload) => {
+      calls.push([cmd, payload]);
+      const [plugin, action] = cmd.replace('plugin:', '').split('|');
+      assert.ok(caps.permissions.includes(`core:${plugin}:allow-${action.replaceAll('_', '-')}`), `Missing permission for ${cmd}`);
+      if (cmd === 'plugin:app|default_window_icon') return 1;
+      if (cmd === 'plugin:menu|new') { items = payload.options.items; return [2, 'test-menu']; }
+      if (cmd === 'plugin:tray|new') return [3, 'toudu-tray'];
+    }, { shouldMockEvents: true });
+    try {
+      await initializeTray();
+      await until(() => calls.some(([c]) => c === 'plugin:window|set_skip_taskbar'));
+      assert.equal(ui.trayReady, true);
+      assert.equal(calls.find(([c]) => c === 'plugin:window|set_skip_taskbar')[1].value, true);
+      ui.ghostHidden = true;
+      items.find(i => i.id === 'settings').handler.onmessage('settings');
+      await until(() => ui.panelOpen);
+      assert.equal(ui.ghostHidden, false);
+      assert.equal(ui.panelTab, 'window');
+      assert.ok(calls.some(([c]) => c === 'plugin:window|unminimize'));
+      await emit('tauri://close-requested');
+      await until(() => calls.some(([c]) => c === 'plugin:window|hide'));
+      assert.ok(!calls.some(([c]) => c === 'plugin:window|destroy'));
+      settings.trayOnly = false;
+      await until(() => calls.some(([c, p]) => c === 'plugin:window|set_skip_taskbar' && p.value === false));
+      await emit('tauri://close-requested');
+      await until(() => calls.some(([c]) => c === 'plugin:window|destroy'));
+    } finally { clearMocks(); globalThis.Event = oldEvent; }
+  });
+} finally {
+  await storage.flushStorage();
+  await server.close();
+  dom.window.close();
+}

@@ -1,0 +1,185 @@
+/* 透读全局样式：透明窗口 + 主题化 */
+
+:root {
+  /* 由 useWindowBehavior 动态写入，初始值确保窗口可见 */
+  --app-alpha: 1;
+  --bg-alpha: 0;
+  --radius: 10px;
+
+  /* 默认：暗色主题 */
+  --bg: rgba(22, 22, 28, 1);
+  --bg-rgb: 22, 22, 28;
+  --bg-soft: rgba(255, 255, 255, 0.06);
+  --bg-hover: rgba(255, 255, 255, 0.12);
+  --border: rgba(255, 255, 255, 0.09);
+  --text: #d8d8de;
+  --text-dim: #8b8b96;
+  --accent: #5eead4;
+  --accent-dim: rgba(94, 234, 212, 0.18);
+  --danger: #f87171;
+  /* 文字衬影：窗口全透明后保证正文在任意背景下可读 */
+  --text-glow: rgba(0, 0, 0, 0.85);
+}
+
+/* 亮色主题 */
+[data-theme="light"] {
+  --bg: rgba(245, 245, 245, 1);
+  --bg-rgb: 245, 245, 245;
+  --bg-soft: rgba(0, 0, 0, 0.04);
+  --bg-hover: rgba(0, 0, 0, 0.08);
+  --border: rgba(0, 0, 0, 0.10);
+  --text: #1a1a2e;
+  --text-dim: #6b6b7b;
+  --accent: #0d9488;
+  --accent-dim: rgba(13, 148, 136, 0.15);
+  --danger: #dc2626;
+  --text-glow: rgba(255, 255, 255, 0.9);
+}
+
+/* 护眼主题 */
+[data-theme="sepia"] {
+  --bg: rgba(244, 236, 216, 1);
+  --bg-rgb: 244, 236, 216;
+  --bg-soft: rgba(139, 109, 70, 0.08);
+  --bg-hover: rgba(139, 109, 70, 0.15);
+  --border: rgba(139, 109, 70, 0.15);
+  --text: #5b4636;
+  --text-dim: #8b7355;
+  --accent: #b8860b;
+  --accent-dim: rgba(184, 134, 11, 0.18);
+  --danger: #cc3333;
+  --text-glow: rgba(255, 250, 235, 0.9);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  /* 透明窗口关键：body 必须透明，颜色画在 .app-root 上 */
+  background: transparent;
+  font-family: 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  user-select: none;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+input:focus,
+textarea:focus {
+  border-color: var(--accent);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 通用小按钮 */
+.btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.btn:hover {
+  background: var(--bg-hover);
+}
+.btn.primary {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn.danger {
+  color: var(--danger);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 开关 */
+.switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  transition: background 0.15s;
+  flex: none;
+}
+.switch.on {
+  background: var(--accent);
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+.switch.on::after {
+  transform: translateX(16px);
+}
+
+/* 滑块行 */
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.slider-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+  background: transparent;
+  border: none;
+}
+.slider-row .val {
+  width: 36px;
+  text-align: right;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}

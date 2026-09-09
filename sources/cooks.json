@@ -1,0 +1,38 @@
+{
+  "bookSourceName": "番茄小说源 · 透读兼容",
+  "bookSourceUrl": "https://novel.cooks.tw",
+  "bookSourceType": 0,
+  "enabled": true,
+  "bookSourceComment": "根据用户提供的规则整理，仅文字小说。搜索、详情、目录与正文接口已于2026-09-09抽样验证。",
+  "header": {
+    "User-Agent": "Mozilla/5.0 (Android 11; Mobile; rv:147.0) Gecko/147.0 Firefox/147.0",
+    "Accept-Language": "zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.6",
+    "Referer": "https://novel.cooks.tw/"
+  },
+  "jsLib": "function Base(){return 'https://novel.cooks.tw';}\nfunction J(s){try{return JSON.parse(String(s||'{}'));}catch(e){return {};}}\nfunction Cover(id){id=String(id||'').replace(/\\D/g,'');if(!id)return '';return 'https://pic.cooks.tw/'+Math.floor(Number(id)/1000)+'/'+id+'/'+id+'s.jpg';}\nfunction Clean(c){return String(c||'').replace(/<br\\s*\\/?>/gi,'\\n').replace(/<p[^>]*>/gi,'\\n').replace(/<\\/p>/gi,'\\n').replace(/<[^>]+>/g,'').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&#39;/g,\"'\").replace(/&quot;/g,'\"').replace(/\\r/g,'').replace(/[ \\t]+\\n/g,'\\n').replace(/\\n{3,}/g,'\\n\\n').trim();}",
+  "searchUrl": "https://novel.cooks.tw/api/novel/search?q={{key}}&page={{page}}&limit=20&lang=zh-CN",
+  "ruleSearch": {
+    "bookList": "$.data.items[*]",
+    "name": "$.articlename",
+    "author": "$.author",
+    "intro": "$.intro",
+    "bookUrl": "https://novel.cooks.tw/api/novel/detail/{{$.articleid}}?lang=zh-CN",
+    "coverUrl": "$.articleid\n<js>Cover(result)</js>"
+  },
+  "ruleBookInfo": {
+    "init": "<js>var j=J(result);var d=j.data||j;cache.putMemory('articleid',String(d.articleid||''));result;</js>",
+    "name": "$.data.articlename",
+    "author": "$.data.author",
+    "intro": "$.data.intro",
+    "coverUrl": "$.data.articleid\n<js>Cover(result)</js>",
+    "tocUrl": "<js>var j=J(result);var d=j.data||j;var id=d.articleid||'';if(!id){var m=String(baseUrl||'').match(/detail\\/(\\d+)/);if(m)id=m[1];}cache.putMemory('articleid',String(id));Base()+'/api/chapter/list/'+id+'?lang=zh-CN'</js>"
+  },
+  "ruleToc": {
+    "chapterList": "$.data[*]||$.data.items[*]||$.data.list[*]||$.data.chapterlist[*]||$.data.chapterList[*]||$.data.chapters[*]",
+    "chapterName": "$.chaptername||$.chapter_name||$.chapterName||$.title||$.name",
+    "chapterUrl": "$.chapterid\n<js>var aid=cache.getFromMemory('articleid')||'';if(!aid){var m=String(baseUrl||'').match(/list\\/(\\d+)/);if(m)aid=m[1];}Base()+'/api/chapter/content/'+aid+'/'+result+'?lang=zh-CN'</js>"
+  },
+  "ruleContent": {
+    "content": "$.data.content\n<js>Clean(result)</js>"
+  }
+}

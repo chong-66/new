@@ -1,0 +1,38 @@
+[
+  {
+    "bookSourceName": "我的书源（待修改）",
+    "bookSourceUrl": "https://books.example.invalid",
+    "bookSourceGroup": "自建书源",
+    "bookSourceType": 0,
+    "enabled": false,
+    "bookSourceComment": "教学模板，域名和选择器均为示例。按页面结构修改后启用。",
+    "searchUrl": "https://books.example.invalid/search?q={{key}}&page={{page}}",
+    "ruleSearch": {
+      "bookList": ".search-results .book-item",
+      "name": ".book-title@text",
+      "author": ".book-author@text##^作者[：:]\\s*##",
+      "bookUrl": ".book-title@href",
+      "coverUrl": "img@src",
+      "intro": ".book-intro@text",
+      "kind": ".book-kind@text"
+    },
+    "ruleBookInfo": {
+      "name": ".book-info h1@text",
+      "author": ".book-author@text##^作者[：:]\\s*##",
+      "coverUrl": ".book-info img@src",
+      "intro": ".book-intro@text",
+      "tocUrl": "a.toc-link@href"
+    },
+    "ruleToc": {
+      "chapterList": ".chapter-list a.chapter",
+      "chapterName": "@text",
+      "chapterUrl": "@href",
+      "nextTocUrl": ""
+    },
+    "ruleContent": {
+      "content": "#content",
+      "nextContentUrl": "",
+      "replaceRegex": ""
+    }
+  }
+]
