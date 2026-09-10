@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia';
 import type { Book, Chapter, SearchResult } from '../types';
 import { readJson, writeJson, writeJsonDebounced } from '../services/storage';
+import { clearBookChapterCache } from '../services/chapterCache';
+import { stopAllChapterCacheTasks } from '../services/chapterCacheTask';
 
 const tocFile = (id: string) => `toc_${id}.json`;
 type TocData = { sourceUrl: string; bookUrl: string; chapters: Chapter[] };
@@ -59,6 +61,8 @@ export const useLibraryStore = defineStore('library', {
       return book;
     },
     async remove(id: string) {
+      await stopAllChapterCacheTasks();
+      await clearBookChapterCache({ id });
       this.books = this.books.filter((b) => b.id !== id);
       delete this.tocCache[id];
       this.save();
@@ -86,7 +90,10 @@ export const useLibraryStore = defineStore('library', {
       book.latestChapter = chapters[chapters.length - 1]?.title ?? '';
       this.refreshUnread(book);
       this.save();
-      await writeJson(tocFile(book.id), tocData(book, chapters)).catch(() => {});
+      await this.persistToc(book, chapters).catch(() => {});
+    },
+    async persistToc(book: Book, chapters: Chapter[]) {
+      await writeJson(tocFile(book.id), tocData(book, chapters));
     },
     refreshUnread(book: Book) {
       const read = book.progress.chapterIndex;
@@ -136,6 +143,8 @@ export const useLibraryStore = defineStore('library', {
       this.save();
     },
     async clear() {
+      await stopAllChapterCacheTasks();
+      await Promise.all(this.books.map((book) => clearBookChapterCache(book)));
       this.books = [];
       this.tocCache = {};
       this.save();

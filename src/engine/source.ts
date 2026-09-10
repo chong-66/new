@@ -2,6 +2,7 @@ import type { Book, BookSource, Chapter, SearchResult } from '../types';
 import { fetchText, withTimeout } from './http';
 import { expandTemplate, parseUrlWithOptions, resolveUrl } from './template';
 import { evalRule, evalRuleList, htmlToText, parseResponse, type RuleCtx } from './rule';
+import { readCachedChapter, writeCachedChapter } from '../services/chapterCache';
 
 /** 书源级请求头（书源 JSON 里 header 字段可能是字符串） */
 function sourceHeaders(source: BookSource): Record<string, string> {
@@ -317,7 +318,18 @@ export function getContent(source: BookSource, chapterUrl: string, book?: Book, 
 }
 
 async function getContentImpl(source: BookSource, chapterUrl: string, book: Book | undefined, options: ContentOptions): Promise<string> {
-  const cacheKey = JSON.stringify([source.bookSourceUrl, chapterUrl, source.ruleContent, source.header, source.jsLib]);
+  const cacheKey = JSON.stringify([source.bookSourceUrl, book?.bookUrl ?? '', chapterUrl, source.ruleContent, source.header, source.jsLib]);
+  let hadPersistentCache = false;
+  if (book) {
+    const saved = await readCachedChapter(book, source, chapterUrl);
+    options.signal?.throwIfAborted();
+    hadPersistentCache = saved !== null;
+    if (!options.force && saved !== null) {
+      if (!contentCache.has(cacheKey) && contentCache.size >= 30) contentCache.delete(contentCache.keys().next().value!);
+      contentCache.set(cacheKey, saved);
+      return saved;
+    }
+  }
   if (options.force) contentCache.delete(cacheKey);
   const cached = contentCache.get(cacheKey);
   if (cached !== undefined) {
@@ -387,6 +399,12 @@ async function getContentImpl(source: BookSource, chapterUrl: string, book: Book
   if (!content) throw new Error('正文为空，请重试或换源');
   if (!contentCache.has(cacheKey) && contentCache.size >= 30) {
     contentCache.delete(contentCache.keys().next().value!);
+  }
+  if (book && options.force && hadPersistentCache) {
+    await writeCachedChapter(book, source, {
+      url: chapterUrl,
+      title: book.progress.chapterUrl === chapterUrl ? book.progress.chapterTitle ?? '' : '',
+    }, content);
   }
   contentCache.set(cacheKey, content);
   return content;

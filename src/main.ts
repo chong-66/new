@@ -9,6 +9,7 @@ import { flushStorage } from './services/storage';
 import { useUiStore } from './stores/ui';
 import { isTauri } from './utils/env';
 import { initializeTray } from './services/tray';
+import { stopAllChapterCacheTasks } from './services/chapterCacheTask';
 
 const app = createApp(App);
 app.use(createPinia());
@@ -18,7 +19,9 @@ async function start() {
   if (isTauri) {
     await initializeTray();
   }
-  window.addEventListener('pagehide', () => { void flushStorage().catch(() => {}); });
+  window.addEventListener('pagehide', () => {
+    void stopAllChapterCacheTasks().then(() => flushStorage()).catch(() => {});
+  });
   app.mount('#app');
 }
 

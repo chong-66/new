@@ -6,6 +6,8 @@ import { useSourcesStore } from '../stores/sources';
 import { useSettingsStore } from '../stores/settings';
 import * as engine from '../engine/source';
 import type { Book, Chapter } from '../types';
+import { cachedChapterUrls } from '../services/chapterCache';
+import { startChapterCacheTask, type ChapterCacheProgress, type ChapterCacheTask } from '../services/chapterCacheTask';
 
 const ui = useUiStore();
 const library = useLibraryStore();
@@ -23,16 +25,37 @@ const content = ref('');
 const loading = ref(false);
 const loadError = ref('');
 const showToc = ref(false);
+const showCache = ref(false);
+const cacheCountInput = ref(String(settings.chapterCacheCount));
+const cachedUrls = ref(new Set<string>());
+const cacheProgress = ref<ChapterCacheProgress | null>(null);
+const taskRange = ref<{ start: number; end: number; total: number } | null>(null);
 const bodyEl = ref<HTMLElement>();
 let disposed = false;
 let chapterRequest = 0;
 let chapterController: AbortController | undefined;
 let tocController: AbortController | undefined;
 let prefetchController: AbortController | undefined;
+let cacheJob: ChapterCacheTask | undefined;
 let renderedSource = '';
 let renderedUrl = '';
 let restoring = false;
 let lastScrollTop = 0;
+
+const cacheRunning = computed(() => cacheProgress.value?.status === 'running');
+const cacheCount = computed(() => {
+  const raw = cacheCountInput.value.trim();
+  if (!/^\d+$/.test(raw)) return 0;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+});
+const cacheRange = computed(() => {
+  if (!cacheCount.value || !toc.value.length) return null;
+  const start = Math.min(Math.max(0, idx.value), toc.value.length - 1);
+  const end = Math.min(toc.value.length - 1, start + cacheCount.value - 1);
+  return { start, end, total: end - start + 1 };
+});
+const displayCacheRange = computed(() => cacheRunning.value ? taskRange.value : cacheRange.value);
 
 function savePosition() {
   const b = book.value;
@@ -41,6 +64,53 @@ function savePosition() {
   if (b.sourceUrl !== renderedSource || b.progress.chapterUrl !== renderedUrl) return;
   const max = el.scrollHeight - el.clientHeight;
   library.updatePosition(b, max > 0 ? el.scrollTop / max : 0);
+}
+
+async function refreshCacheStatus() {
+  const b = book.value;
+  const s = source.value;
+  if (!b || !s || !toc.value.length) { cachedUrls.value = new Set(); return; }
+  const sourceUrl = b.sourceUrl;
+  const urls = await cachedChapterUrls(b, s, toc.value);
+  if (!disposed && book.value?.id === b.id && book.value.sourceUrl === sourceUrl) cachedUrls.value = urls;
+}
+
+function openCache() {
+  showToc.value = false;
+  showCache.value = true;
+  void refreshCacheStatus();
+}
+function chooseCacheCount(value: number) { if (!cacheRunning.value) cacheCountInput.value = String(value); }
+function stopCaching() { cacheJob?.cancel(); }
+
+function startCaching() {
+  const b = book.value;
+  const s = source.value;
+  const range = cacheRange.value;
+  if (!b || !s || !range || cacheRunning.value || tocLoading.value) {
+    ui.showToast(cacheCount.value ? '目录尚未准备好' : '缓存章数必须是正整数');
+    return;
+  }
+  taskRange.value = { ...range };
+  settings.chapterCacheCount = cacheCount.value;
+  prefetchController?.abort();
+  const bookId = b.id;
+  const chapters = [...toc.value];
+  cacheProgress.value = { status: 'running', total: range.total, processed: 0, saved: 0, skipped: 0, failed: 0, currentTitle: '', message: '' };
+  const job = startChapterCacheTask({
+    book: b, source: s, chapters, start: range.start, count: cacheCount.value,
+    persistToc: () => library.persistToc(b, chapters),
+    onProgress(progress) {
+      if (disposed || book.value?.id !== bookId || cacheJob !== job) return;
+      cacheProgress.value = progress;
+      if (progress.cachedUrl) cachedUrls.value = new Set([...cachedUrls.value, progress.cachedUrl]);
+    },
+  });
+  cacheJob = job;
+  void job.done.finally(() => {
+    if (cacheJob === job) cacheJob = undefined;
+    void refreshCacheStatus();
+  });
 }
 
 async function ensureToc(force = false) {
@@ -128,7 +198,7 @@ async function loadChapter(i: number, force = false, restoreRatio = 0) {
     }
     requestAnimationFrame(() => { if (request === chapterRequest) restoring = false; });
     const nextCh = toc.value[target + 1];
-    if (nextCh) {
+    if (nextCh && !cacheRunning.value) {
       prefetchController = new AbortController();
       void engine.getContent(s, nextCh.url, b, { signal: prefetchController.signal }).catch(() => {});
     }
@@ -155,13 +225,16 @@ function next() {
 }
 function back() {
   savePosition();
+  stopCaching();
   ui.closeReading();
 }
 function changeSource() {
   savePosition();
+  stopCaching();
   if (book.value) ui.openSearch(book.value.name, book.value.id);
 }
 async function openToc() {
+  showCache.value = false;
   showToc.value = true;
   await nextTick();
   document.querySelector('.toc-list .cur')?.scrollIntoView({ block: 'center' });
@@ -172,11 +245,13 @@ function jump(i: number) {
 }
 async function refreshToc() {
   if (tocLoading.value) return;
+  stopCaching();
   savePosition();
   const progress = { ...book.value?.progress };
   chapterController?.abort();
   chapterRequest++;
   await ensureToc(true);
+  await refreshCacheStatus();
   if (disposed || !toc.value.length) return;
   const found = toc.value.findIndex((c) => c.url === progress.chapterUrl);
   await loadChapter(found >= 0 ? found : (progress.chapterIndex ?? idx.value), false, found >= 0 ? progress.scrollRatio ?? 0 : 0);
@@ -184,6 +259,10 @@ async function refreshToc() {
 
 function onKey(e: KeyboardEvent) {
   if (ui.searchOpen || ui.panelOpen || e.defaultPrevented || e.isComposing) return;
+  if (showCache.value) {
+    if (e.key === 'Escape') { e.preventDefault(); showCache.value = false; }
+    return;
+  }
   if ((e.target as HTMLElement)?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
   if (showToc.value) {
     if (e.key === 'Escape') { e.preventDefault(); showToc.value = false; }
@@ -197,7 +276,7 @@ function onKey(e: KeyboardEvent) {
 }
 
 function onWheel(e: WheelEvent) {
-  if (!e.ctrlKey || ui.searchOpen || ui.panelOpen || showToc.value || !bodyEl.value?.contains(e.target as Node)) return;
+  if (!e.ctrlKey || ui.searchOpen || ui.panelOpen || showToc.value || showCache.value || !bodyEl.value?.contains(e.target as Node)) return;
   e.preventDefault();
   const step = e.deltaY > 0 ? -1 : 1;
   settings.fontSize = Math.min(28, Math.max(14, settings.fontSize + step));
@@ -211,7 +290,7 @@ function onBodyScroll() {
   const { scrollTop, scrollHeight, clientHeight } = bodyEl.value;
   const downward = scrollTop > lastScrollTop;
   lastScrollTop = scrollTop;
-  if (!settings.autoNextChapter || restoring || !downward || loading.value || loadError.value || ui.searchOpen || ui.panelOpen || showToc.value || idx.value >= toc.value.length - 1) return;
+  if (!settings.autoNextChapter || restoring || !downward || loading.value || loadError.value || ui.searchOpen || ui.panelOpen || showToc.value || showCache.value || idx.value >= toc.value.length - 1) return;
   if (scrollHeight - scrollTop - clientHeight <= 4 && !autoNextLock) {
     autoNextLock = true;
     loadChapter(idx.value + 1).finally(() => { autoNextLock = false; });
@@ -230,6 +309,7 @@ onMounted(async () => {
   const saved = { ...b.progress };
   idx.value = b.totalChapters ? Math.min(b.progress.chapterIndex, b.totalChapters - 1) : b.progress.chapterIndex;
   await ensureToc();
+  await refreshCacheStatus();
   const found = toc.value.findIndex((c) => c.url === saved.chapterUrl);
   if (toc.value.length) await loadChapter(found >= 0 ? found : idx.value, false, saved.scrollRatio ?? 0);
 });
@@ -240,6 +320,7 @@ onBeforeUnmount(() => {
   chapterController?.abort();
   tocController?.abort();
   prefetchController?.abort();
+  stopCaching();
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('wheel', onWheel);
 });
@@ -255,6 +336,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="ops">
         <button class="btn" title="换源" @click="changeSource">换源</button>
+        <button class="btn" title="缓存章节" :disabled="!toc.length || tocLoading" @click="openCache">缓存</button>
         <button class="btn" title="目录" @click="openToc">目录</button>
       </div>
     </div>
@@ -297,8 +379,41 @@ onBeforeUnmount(() => {
             :class="{ cur: i === idx }"
             @click="jump(i)"
           >
-            {{ c.title }}
+            <span>{{ c.title }}</span>
+            <span v-if="cachedUrls.has(c.url)" class="cached-mark">已缓存</span>
           </div>
+        </div>
+      </aside>
+    </div>
+
+    <div v-if="showCache" class="toc-mask cache-mask" @click.self="showCache = false">
+      <aside class="cache-panel">
+        <div class="toc-head">
+          <span>缓存章节</span>
+          <button class="btn" @click="showCache = false">关闭</button>
+        </div>
+        <div class="cache-body">
+          <p>从当前第 {{ idx + 1 }} 章开始，包含当前章</p>
+          <label class="cache-input-row">
+            <span>缓存章数</span>
+            <input v-model="cacheCountInput" class="cache-input" inputmode="numeric" :disabled="cacheRunning" aria-label="缓存章数">
+          </label>
+          <div class="cache-presets">
+            <button v-for="n in [10, 50, 100]" :key="n" class="btn" :disabled="cacheRunning" @click="chooseCacheCount(n)">{{ n }}</button>
+          </div>
+          <p v-if="displayCacheRange" class="cache-note">本次范围：第 {{ displayCacheRange.start + 1 }}～{{ displayCacheRange.end + 1 }} 章，共 {{ displayCacheRange.total }} 章</p>
+          <p v-else class="cache-error">请输入正整数章数</p>
+          <p class="cache-note">本书当前书源已缓存：{{ cachedUrls.size }} 章</p>
+          <template v-if="cacheProgress">
+            <progress class="cache-progress" :max="cacheProgress.total" :value="cacheProgress.processed"></progress>
+            <p>{{ cacheProgress.status === 'running' ? '缓存中' : cacheProgress.status === 'completed' ? '缓存完成' : cacheProgress.status === 'cancelled' ? '已停止' : '缓存失败' }}：{{ cacheProgress.processed }} / {{ cacheProgress.total }}</p>
+            <p class="cache-note">新保存 {{ cacheProgress.saved }} 章 · 已有 {{ cacheProgress.skipped }} 章 · 失败 {{ cacheProgress.failed }} 章</p>
+            <p v-if="cacheProgress.currentTitle" class="cache-note">正在缓存：{{ cacheProgress.currentTitle }}</p>
+            <p v-if="cacheProgress.message" :class="cacheProgress.status === 'error' ? 'cache-error' : 'cache-note'">{{ cacheProgress.message }}</p>
+          </template>
+          <button v-if="cacheRunning" class="btn cache-main" @click="stopCaching">停止缓存</button>
+          <button v-else class="btn cache-main" :disabled="!cacheRange || tocLoading" @click="startCaching">开始缓存</button>
+          <p class="cache-hint">关闭此面板仍会继续；离开阅读页会停止任务，已保存章节会保留。</p>
         </div>
       </aside>
     </div>
@@ -420,6 +535,10 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .toc-item:hover {
   background: var(--bg-soft);
@@ -429,4 +548,31 @@ onBeforeUnmount(() => {
   color: var(--accent);
   background: var(--accent-dim);
 }
+.toc-item > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.cached-mark { flex: none; color: var(--accent); font-size: 11px; }
+.cache-mask { z-index: 55; }
+.cache-panel {
+  width: min(330px, calc(100% - 24px));
+  max-height: 100%;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+.cache-body { padding: 14px; overflow-y: auto; font-size: 13px; }
+.cache-input-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cache-input {
+  width: 96px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.cache-presets { display: flex; gap: 6px; margin: 10px 0; }
+.cache-note, .cache-hint { color: var(--text-dim); }
+.cache-error { color: var(--danger); }
+.cache-progress { width: 100%; margin-top: 8px; accent-color: var(--accent); }
+.cache-main { width: 100%; margin: 4px 0 10px; }
+.cache-hint { font-size: 11px; line-height: 1.5; }
 </style>

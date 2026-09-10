@@ -7,6 +7,7 @@ import { useSettingsStore } from '../stores/settings';
 import { useUiStore } from '../stores/ui';
 import { flushStorage } from './storage';
 import { createWindowCloseController } from './windowClose';
+import { stopAllChapterCacheTasks } from './chapterCacheTask';
 
 export async function initializeTray() {
   const win = getCurrentWindow();
@@ -23,7 +24,7 @@ export async function initializeTray() {
   const controller = createWindowCloseController({
     trayOnly: () => ui.trayReady && settings.trayOnly,
     hide: () => win.hide(),
-    save: async () => { await nextTick(); await flushStorage(); },
+    save: async () => { await stopAllChapterCacheTasks(); await nextTick(); await flushStorage(); },
     // 保存完成后直接销毁，避免重复触发关闭事件。
     close: () => win.destroy(),
     failed: async () => {

@@ -21,6 +21,7 @@ export interface AppSettings {
   textColor: string;
   /** 滚动到底部自动加载下一章 */
   autoNextChapter: boolean;
+  chapterCacheCount: number;
   /** 阅读主题 */
   theme: 'dark' | 'light' | 'sepia';
   /** 隐藏窗口边框 */
@@ -39,6 +40,7 @@ const DEFAULTS: AppSettings = {
   fontFamily: '',
   textColor: '',
   autoNextChapter: false,
+  chapterCacheCount: 50,
   theme: 'dark',
   hideBorder: false,
 };
@@ -56,6 +58,8 @@ export const useSettingsStore = defineStore('settings', {
       this.fontSize = Math.min(28, Math.max(14, Number(this.fontSize) || 18));
       this.lineHeight = Math.min(2.6, Math.max(1.4, Number(this.lineHeight) || 1.9));
       this.loaded = true;
+      this.chapterCacheCount = Number.isInteger(Number(this.chapterCacheCount)) && Number(this.chapterCacheCount) > 0
+        ? Number(this.chapterCacheCount) : 50;
       this.$subscribe((mut, state) => {
         const { loaded, ...data } = state;
         writeJsonDebounced('settings.json', data);

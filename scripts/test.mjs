@@ -18,6 +18,8 @@ const engine = await load('engine/source.ts');
 const http = await load('engine/http.ts');
 const rule = await load('engine/rule.ts');
 const storage = await load('services/storage.ts');
+const chapterCache = await load('services/chapterCache.ts');
+const { startChapterCacheTask } = await load('services/chapterCacheTask.ts');
 const { useLibraryStore } = await load('stores/library.ts');
 const { useSourcesStore } = await load('stores/sources.ts');
 const { useUiStore } = await load('stores/ui.ts');
@@ -131,6 +133,54 @@ try {
     s.ruleContent.content = '#new';
     assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'new');
   });
+  await test('persistent chapter cache survives memory eviction and stays isolated by book URL', async () => {
+    const { library } = freshStores();
+    const s = source('persistent-cache');
+    const b = library.addFromSearch(result(s));
+    const chapters = Array.from({ length: 35 }, (_, i) => ({ title: `Chapter ${i + 1}`, url: `${s.bookSourceUrl}/chapter/${i + 1}` }));
+    for (let i = 0; i < chapters.length; i++) {
+      await chapterCache.writeCachedChapter(b, s, chapters[i], `saved ${i + 1}`);
+    }
+    window.fetch = async () => { throw new Error('offline'); };
+    assert.equal(await engine.getContent(s, chapters[0].url, b), 'saved 1');
+    assert.equal(await engine.getContent(s, chapters[34].url, b), 'saved 35');
+    const otherBook = { ...b, bookUrl: b.bookUrl + '/other', progress: { chapterIndex: 0 } };
+    await assert.rejects(engine.getContent(s, chapters[0].url, otherBook), /offline/);
+    window.fetch = async () => new Response('Unavailable', { status: 503 });
+    await assert.rejects(engine.getContent(s, chapters[0].url, b, { force: true }), /503/);
+    assert.equal(await engine.getContent(s, chapters[0].url, b), 'saved 1');
+    await chapterCache.clearBookChapterCache(b);
+  });
+
+  await test('cache task uses an exact range, skips saved chapters and preserves reading progress', async () => {
+    const { library } = freshStores();
+    const s = source('cache-task');
+    const b = library.addFromSearch(result(s));
+    b.progress = { chapterIndex: 1, chapterUrl: `${s.bookSourceUrl}/chapter/2`, scrollRatio: 0.4 };
+    const before = { ...b.progress };
+    const chapters = Array.from({ length: 5 }, (_, i) => ({ title: `C${i + 1}`, url: `${s.bookSourceUrl}/chapter/${i + 1}` }));
+    await chapterCache.writeCachedChapter(b, s, chapters[1], 'already saved');
+    let requests = 0;
+    let persisted = 0;
+    window.fetch = async () => { requests++; return new Response('<div id="body">downloaded</div>'); };
+    const job = startChapterCacheTask({
+      book: b, source: s, chapters, start: 1, count: 2, delayMs: 0,
+      persistToc: async () => { persisted++; },
+    });
+    const final = await job.done;
+    assert.equal(final.status, 'completed');
+    assert.deepEqual(
+      { total: final.total, saved: final.saved, skipped: final.skipped, failed: final.failed },
+      { total: 2, saved: 1, skipped: 1, failed: 0 },
+    );
+    assert.equal(requests, 1);
+    assert.equal(persisted, 1);
+    assert.deepEqual(b.progress, before);
+    assert.equal(await chapterCache.readCachedChapter(b, s, chapters[2].url), 'downloaded');
+    assert.equal(await chapterCache.readCachedChapter(b, s, chapters[3].url), null);
+    await chapterCache.clearBookChapterCache(b);
+  });
+
   await test('chapter matching accepts formatting differences and rejects ambiguous titles', () => {
     assert.equal(matchChapter([{ title: '第１章： 初见', url: 'a' }], '第1章 初见'), 0);
     assert.equal(matchChapter([{ title: '序章', url: 'a' }, { title: '序章', url: 'b' }], '序章'), -1);

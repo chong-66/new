@@ -357,7 +357,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey, true));
         <!-- 关于 -->
         <template v-else>
           <h3>透读 TouDu</h3>
-          <p class="dim para-tip">v0.1.3 · 透明背景极简桌面小说阅读器</p>
+          <p class="dim para-tip">v0.1.4 · 透明背景极简桌面小说阅读器</p>
           <p class="dim para-tip">兼容阅读 3.0 JSON 书源（文本类型）。支持搜索、目录、正文分页规则与 JS 规则。</p>
           <p class="dim para-tip">快捷键：← 上一章，→ 下一章，Esc 返回书架。</p>
         </template>
