@@ -59,6 +59,6 @@ img {
   font-size: 22px;
   font-weight: 600;
   color: var(--accent);
-  background: linear-gradient(145deg, rgba(94, 234, 212, 0.12), rgba(94, 234, 212, 0.03));
+  background: linear-gradient(145deg, var(--accent-dim), transparent);
 }
 </style>

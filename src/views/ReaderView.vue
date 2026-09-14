@@ -677,7 +677,7 @@ onBeforeUnmount(() => {
 .toc-mask {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--overlay);
   display: flex;
   justify-content: flex-end;
   z-index: 50;

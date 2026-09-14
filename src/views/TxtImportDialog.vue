@@ -219,7 +219,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.txt-mask { position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; padding: 40px 24px 24px; background: rgba(0,0,0,.48); }
+.txt-mask { position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; padding: 40px 24px 24px; background: var(--overlay); }
 .txt-panel { width: min(760px, 100%); max-height: 100%; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
 .txt-head, .txt-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
 .txt-actions { border-top: 1px solid var(--border); border-bottom: 0; }

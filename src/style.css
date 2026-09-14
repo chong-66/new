@@ -1,6 +1,7 @@
 /* 透读全局样式：透明窗口 + 主题化 */
 
 :root {
+  color-scheme: dark;
   /* 由 useWindowBehavior 动态写入，初始值确保窗口可见 */
   --app-alpha: 1;
   --bg-alpha: 0;
@@ -12,42 +13,112 @@
   --bg-soft: rgba(255, 255, 255, 0.06);
   --bg-hover: rgba(255, 255, 255, 0.12);
   --border: rgba(255, 255, 255, 0.09);
-  --text: #d8d8de;
-  --text-dim: #8b8b96;
+  --text: #e6e6eb;
+  --text-dim: #a3a3af;
   --accent: #5eead4;
   --accent-dim: rgba(94, 234, 212, 0.18);
   --danger: #f87171;
+  --accent-contrast: #042f2a;
+  --overlay: rgba(0, 0, 0, 0.45);
+  --scroll-thumb: rgba(255, 255, 255, 0.18);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.30);
+  --switch-knob: #ffffff;
+  --toast-bg: rgba(0, 0, 0, 0.86);
+  --toast-text: #f8fafc;
   /* 文字衬影：窗口全透明后保证正文在任意背景下可读 */
   --text-glow: rgba(0, 0, 0, 0.85);
 }
 
+/* 深海主题 */
+[data-theme="midnight"] {
+  color-scheme: dark;
+  --bg: rgba(15, 23, 42, 1);
+  --bg-rgb: 15, 23, 42;
+  --bg-soft: rgba(148, 163, 184, 0.10);
+  --bg-hover: rgba(148, 163, 184, 0.18);
+  --border: rgba(148, 163, 184, 0.18);
+  --text: #e2e8f0;
+  --text-dim: #a8b4c5;
+  --accent: #60a5fa;
+  --accent-dim: rgba(96, 165, 250, 0.20);
+  --danger: #fb7185;
+  --accent-contrast: #0b1220;
+  --overlay: rgba(2, 6, 23, 0.55);
+  --text-glow: rgba(0, 0, 0, 0.90);
+}
+
+/* 墨绿主题 */
+[data-theme="forest"] {
+  color-scheme: dark;
+  --bg: rgba(16, 32, 27, 1);
+  --bg-rgb: 16, 32, 27;
+  --bg-soft: rgba(167, 243, 208, 0.09);
+  --bg-hover: rgba(167, 243, 208, 0.17);
+  --border: rgba(167, 243, 208, 0.16);
+  --text: #e1eee7;
+  --text-dim: #a7bdb1;
+  --accent: #6ee7b7;
+  --accent-dim: rgba(110, 231, 183, 0.18);
+  --danger: #fb7185;
+  --accent-contrast: #06251a;
+  --overlay: rgba(3, 18, 13, 0.52);
+  --text-glow: rgba(0, 0, 0, 0.90);
+}
+
+/* 暮紫主题 */
+[data-theme="plum"] {
+  color-scheme: dark;
+  --bg: rgba(36, 24, 36, 1);
+  --bg-rgb: 36, 24, 36;
+  --bg-soft: rgba(240, 171, 252, 0.09);
+  --bg-hover: rgba(240, 171, 252, 0.17);
+  --border: rgba(240, 171, 252, 0.16);
+  --text: #f1e4ef;
+  --text-dim: #c7aec1;
+  --accent: #e879f9;
+  --accent-dim: rgba(232, 121, 249, 0.19);
+  --danger: #fb7185;
+  --accent-contrast: #2a1030;
+  --overlay: rgba(24, 12, 25, 0.54);
+  --text-glow: rgba(0, 0, 0, 0.90);
+}
 /* 亮色主题 */
 [data-theme="light"] {
-  --bg: rgba(245, 245, 245, 1);
-  --bg-rgb: 245, 245, 245;
+  color-scheme: light;
+  --bg: rgba(247, 248, 251, 1);
+  --bg-rgb: 247, 248, 251;
   --bg-soft: rgba(0, 0, 0, 0.04);
   --bg-hover: rgba(0, 0, 0, 0.08);
   --border: rgba(0, 0, 0, 0.10);
-  --text: #1a1a2e;
-  --text-dim: #6b6b7b;
-  --accent: #0d9488;
-  --accent-dim: rgba(13, 148, 136, 0.15);
-  --danger: #dc2626;
+  --text: #182033;
+  --text-dim: #5e6778;
+  --accent: #0f766e;
+  --accent-dim: rgba(15, 118, 110, 0.14);
+  --danger: #c62828;
+  --accent-contrast: #ffffff;
+  --overlay: rgba(15, 23, 42, 0.28);
+  --scroll-thumb: rgba(30, 41, 59, 0.24);
+  --scroll-thumb-hover: rgba(30, 41, 59, 0.38);
   --text-glow: rgba(255, 255, 255, 0.9);
 }
 
 /* 护眼主题 */
 [data-theme="sepia"] {
+  color-scheme: light;
   --bg: rgba(244, 236, 216, 1);
   --bg-rgb: 244, 236, 216;
   --bg-soft: rgba(139, 109, 70, 0.08);
   --bg-hover: rgba(139, 109, 70, 0.15);
   --border: rgba(139, 109, 70, 0.15);
-  --text: #5b4636;
-  --text-dim: #8b7355;
-  --accent: #b8860b;
-  --accent-dim: rgba(184, 134, 11, 0.18);
-  --danger: #cc3333;
+  --text: #49372a;
+  --text-dim: #735f4c;
+  --accent: #9a6700;
+  --accent-dim: rgba(154, 103, 0, 0.16);
+  --danger: #b42318;
+  --accent-contrast: #fffaf0;
+  --overlay: rgba(73, 55, 42, 0.28);
+  --scroll-thumb: rgba(73, 55, 42, 0.24);
+  --scroll-thumb-hover: rgba(73, 55, 42, 0.38);
   --text-glow: rgba(255, 250, 235, 0.9);
 }
 
@@ -97,16 +168,26 @@ textarea:focus {
   border-color: var(--accent);
 }
 
+option {
+  color: var(--text);
+  background: var(--bg);
+}
+
+::selection {
+  color: var(--text);
+  background: var(--accent-dim);
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--scroll-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.24);
+  background: var(--scroll-thumb-hover);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -158,7 +239,7 @@ textarea:focus {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--switch-knob);
   transition: transform 0.15s;
 }
 .switch.on::after {

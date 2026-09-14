@@ -117,8 +117,9 @@ watch(() => settings.theme, (t) => {
   transform: translateX(-50%);
   padding: 8px 16px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.82);
+  background: var(--toast-bg);
   border: 1px solid var(--border);
+  color: var(--toast-text);
   font-size: 13px;
   z-index: 200;
   pointer-events: none;

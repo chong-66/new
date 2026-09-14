@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { readJson, writeJsonDebounced } from '../services/storage';
+import { normalizeTheme, themeById, type ThemeId } from '../themes';
 
 export interface AppSettings {
   /** 隐藏时不透明度 0-30（0 完全隐形） */
@@ -27,7 +28,7 @@ export interface AppSettings {
 
   chapterCacheCount: number;
   /** 阅读主题 */
-  theme: 'dark' | 'light' | 'sepia';
+  theme: ThemeId;
   /** 隐藏窗口边框 */
   hideBorder: boolean;
 }
@@ -60,7 +61,12 @@ export const useSettingsStore = defineStore('settings', {
       // 只保留已知字段（清理已移除的旧字段残留）
       for (const k of Object.keys(saved)) if (!(k in DEFAULTS)) delete (saved as any)[k];
       Object.assign(this, DEFAULTS, saved);
+      this.theme = normalizeTheme(this.theme);
       if (this.textColor === '#d8d8de') this.textColor = '';
+      const background = Number(this.bgOpacity);
+      this.bgOpacity = Math.min(100, Math.max(themeById(this.theme).minimumBackgroundOpacity, Number.isFinite(background) ? background : 0));
+      const opacity = Number(this.windowOpacity);
+      this.windowOpacity = Math.min(100, Math.max(20, Number.isFinite(opacity) ? opacity : 100));
       this.fontSize = Math.min(28, Math.max(14, Number(this.fontSize) || 18));
       this.lineHeight = Math.min(2.6, Math.max(1.4, Number(this.lineHeight) || 1.9));
       this.loaded = true;

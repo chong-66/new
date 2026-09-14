@@ -125,7 +125,7 @@ async function remove(book: Book, e: MouseEvent) {
   padding: 0 5px;
   border-radius: 9px;
   background: var(--accent);
-  color: #042f2a;
+  color: var(--accent-contrast);
   font-size: 11px;
   font-weight: 700;
   display: flex;

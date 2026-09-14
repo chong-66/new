@@ -28,6 +28,7 @@ const localBooks = await load('services/localBooks.ts');
 const txtParser = await load('services/txtParser.ts');
 const { useSettingsStore } = await load('stores/settings.ts');
 const { matchChapter } = await load('services/reading.ts');
+const { THEMES, normalizeTheme, themeById } = await load('themes.ts');
 
 const source = (name) => ({ bookSourceName: name, bookSourceUrl: `https://${name}.invalid`, searchUrl: '/search', ruleSearch: { bookList: '.book', name: 'a@text', author: '.author@text', bookUrl: 'a@href' }, ruleToc: { chapterList: 'a', chapterName: '@text', chapterUrl: '@href' }, ruleContent: { content: '#body' } });
 const result = (s) => ({ name: 'Example', author: 'Author', bookUrl: `${s.bookSourceUrl}/book`, source: s, coverUrl: '', intro: '', kind: '' });
@@ -352,6 +353,29 @@ try {
     assert.match(appSource, /\.app-root\.reader-mode \.subbar \{/);
     assert.match(appSource, /\.app-root\.reader-mode > \.titlebar \{/);
     assert.doesNotMatch(readerSource, /:global\(\.app-root\.reader-mode\)/);
+  });
+  await test('theme catalog is complete and readable', async () => {
+    assert.equal(THEMES.length, 6);
+    assert.equal(new Set(THEMES.map((theme) => theme.id)).size, THEMES.length);
+    assert.equal(normalizeTheme('missing'), 'dark');
+    assert.equal(themeById('light').minimumBackgroundOpacity, 85);
+    assert.equal(themeById('sepia').minimumBackgroundOpacity, 72);
+    const luminance = (hex) => {
+      const channels = hex.slice(1).match(/.{2}/g).map((value) => parseInt(value, 16) / 255);
+      const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+    };
+    for (const theme of THEMES) {
+      const values = [luminance(theme.swatch), luminance(theme.textColor)].sort((a, b) => b - a);
+      assert.ok((values[0] + 0.05) / (values[1] + 0.05) >= 4.5, `${theme.id} text contrast is too low`);
+    }
+    const style = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+    for (const theme of THEMES.filter((item) => item.id !== 'dark')) {
+      assert.match(style, new RegExp('\\[data-theme="' + theme.id + '"\\]'));
+    }
+    assert.match(style, /--scroll-thumb:/);
+    assert.match(style, /--accent-contrast:/);
+    assert.match(style, /--overlay:/);
   });
   await test('local TXT opens without a source and reads persisted chapter text', async () => {
     const parsed = txtParser.parseTxt(new TextEncoder().encode('第一章\n离线本地正文').buffer);

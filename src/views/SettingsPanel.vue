@@ -5,12 +5,19 @@ import { useSettingsStore } from '../stores/settings';
 import { useSourcesStore } from '../stores/sources';
 import { useLibraryStore } from '../stores/library';
 import PurificationManager from './PurificationManager.vue';
+import { THEMES, themeById, type ThemeId } from '../themes';
 
 const ui = useUiStore();
 const settings = useSettingsStore();
 const sources = useSourcesStore();
 const library = useLibraryStore();
 const purificationManager = ref<InstanceType<typeof PurificationManager>>();
+const activeTheme = computed(() => themeById(settings.theme));
+
+function selectTheme(theme: ThemeId) {
+  settings.theme = theme;
+  settings.bgOpacity = Math.max(settings.bgOpacity, themeById(theme).minimumBackgroundOpacity);
+}
 
 const tabs = [
   { key: 'sources', label: '书源' },
@@ -288,7 +295,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey, true));
           <label class="field">
             <span>正文颜色</span>
             <div class="row">
-              <input :value="settings.textColor || (settings.theme === 'dark' ? '#d8d8de' : settings.theme === 'sepia' ? '#5b4636' : '#1a1a2e')" type="color" class="color" @input="settings.textColor = ($event.target as HTMLInputElement).value" />
+              <input :value="settings.textColor || activeTheme.textColor" type="color" class="color" @input="settings.textColor = ($event.target as HTMLInputElement).value" />
               <button class="btn" @click="settings.textColor = ''">跟随主题</button>
             </div>
           </label>
@@ -305,15 +312,19 @@ onUnmounted(() => window.removeEventListener('keydown', onKey, true));
           <label class="field">
             <span>阅读主题</span>
             <div class="theme-row">
-              <button class="theme-card" :class="{ on: settings.theme === 'dark' }" @click="settings.theme = 'dark'">
-                <span class="swatch dark"></span> 暗色
+              <button
+                v-for="theme in THEMES"
+                :key="theme.id"
+                class="theme-card"
+                :class="{ on: settings.theme === theme.id }"
+                :style="{ '--theme-swatch': theme.swatch }"
+                @click="selectTheme(theme.id)"
+              >
+                <span class="swatch"></span> {{ theme.label }}
               </button>
-              <button class="theme-card" :class="{ on: settings.theme === 'light' }" @click="settings.theme = 'light'">
-                <span class="swatch light"></span> 亮色
-              </button>
-              <button class="theme-card" :class="{ on: settings.theme === 'sepia' }" @click="settings.theme = 'sepia'">
-                <span class="swatch sepia"></span> 护眼
-              </button>
+            </div>
+            <div v-if="activeTheme.minimumBackgroundOpacity" class="desc">
+              为保证深色文字清晰，本主题的背景不透明度最低为 {{ activeTheme.minimumBackgroundOpacity }}%。
             </div>
           </label>
         </template>
@@ -355,7 +366,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey, true));
           <label class="field">
             <span>背景不透明度</span>
             <div class="slider-row">
-              <input v-model.number="settings.bgOpacity" type="range" min="0" max="100" />
+              <input v-model.number="settings.bgOpacity" type="range" :min="activeTheme.minimumBackgroundOpacity" max="100" />
               <span class="val">{{ settings.bgOpacity }}%</span>
             </div>
           </label>
@@ -403,7 +414,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey, true));
 .mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -635,12 +646,15 @@ textarea {
   margin-top: 2px;
 }
 .theme-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 .theme-card {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
   gap: 6px;
   padding: 8px 12px;
   border-radius: 8px;
@@ -659,14 +673,13 @@ textarea {
   color: var(--accent);
 }
 .swatch {
+  background: var(--theme-swatch);
+  border: 1px solid var(--border);
   width: 16px;
   height: 16px;
   border-radius: 4px;
   flex: none;
 }
-.swatch.dark { background: #16161c; border: 1px solid rgba(255,255,255,0.15); }
-.swatch.light { background: #f5f5f5; border: 1px solid rgba(0,0,0,0.15); }
-.swatch.sepia { background: #f4ecd8; border: 1px solid rgba(139,109,70,0.3); }
 .para-tip {
   line-height: 1.7;
 }
