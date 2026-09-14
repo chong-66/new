@@ -5,6 +5,7 @@ import { isTauri } from '../utils/env';
 import { setInteracting } from '../composables/useWindowBehavior';
 
 const ui = useUiStore();
+const isDev = import.meta.env.DEV;
 const settings = useSettingsStore();
 
 async function win() {
@@ -43,6 +44,7 @@ async function close() {
 <template>
   <header class="titlebar" @mousedown="onDragStart">
     <div class="brand">
+      <span v-if="isDev" class="dev-badge">开发版</span>
       <span class="name">透读</span>
     </div>
     <div class="actions" @mousedown.stop>
@@ -80,6 +82,14 @@ async function close() {
   align-items: center;
   gap: 8px;
   pointer-events: none;
+.dev-badge {
+  padding: 1px 5px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: 0;
+}
 }
 .name {
   font-size: 13px;

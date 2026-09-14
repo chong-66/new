@@ -8,7 +8,7 @@ export const useUiStore = defineStore('ui', {
     trayReady: false,
     /** 设置面板 */
     panelOpen: false,
-    panelTab: 'sources' as 'sources' | 'appearance' | 'window' | 'data' | 'about',
+    panelTab: 'sources' as 'sources' | 'appearance' | 'purification' | 'window' | 'data' | 'about',
     /** 搜索弹窗 */
     searchOpen: false,
     /** 换源模式：带着书名预填搜索 */

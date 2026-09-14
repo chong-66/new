@@ -1,11 +1,11 @@
 {
   "name": "toudu",
-  "version": "0.1.4",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "description": "透读 - 透明背景的极简桌面小说阅读器，兼容阅读3.0书源",
   "scripts": {
-    "test": "node scripts/test.mjs && node scripts/check-chapter-cache.mjs && node scripts/check-cooks.mjs",
+    "test": "node scripts/test.mjs && node scripts/check-reader-features.mjs && node scripts/check-chapter-cache.mjs && node scripts/check-cooks.mjs",
     "typecheck": "tsc --noEmit",
     "dev": "vite",
     "build": "vite build",

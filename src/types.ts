@@ -75,12 +75,28 @@ export interface Book {
   latestChapter: string;
   /** 未读章节数角标 */
   unreadCount: number;
+  /** 旧数据缺失时视为 remote。 */
+  origin?: 'remote' | 'local-txt';
+  /** 本地 TXT 的稳定导入元信息，正文另存于应用数据目录。 */
+  localTxt?: {
+    version: 1;
+    contentHash: string;
+    originalName: string;
+    encoding: string;
+    splitMethod: 'headings' | 'length';
+    parserVersion: number;
+    importedAt: number;
+  };
   progress: { chapterIndex: number; chapterUrl?: string; chapterTitle?: string; scrollRatio?: number };
 }
 
 export interface Chapter {
   title: string;
   url: string;
+}
+
+export function isLocalBook(book: Pick<Book, 'origin'> | undefined): boolean {
+  return book?.origin === 'local-txt';
 }
 
 /** 搜索结果（未入架的轻量书籍信息） */

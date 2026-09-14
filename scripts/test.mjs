@@ -9,6 +9,7 @@ for (const key of ['window', 'document', 'Element', 'HTMLElement', 'SVGElement',
   globalThis[key] = dom.window[key];
 }
 globalThis.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
+globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
 const { default: vuePlugin } = await import('@vitejs/plugin-vue');
 const server = await createServer({ configFile: false, plugins: [vuePlugin()], server: { middlewareMode: true, watch: null }, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] } });
 const load = (path) => server.ssrLoadModule(`/src/${path}`);
@@ -23,6 +24,9 @@ const { startChapterCacheTask } = await load('services/chapterCacheTask.ts');
 const { useLibraryStore } = await load('stores/library.ts');
 const { useSourcesStore } = await load('stores/sources.ts');
 const { useUiStore } = await load('stores/ui.ts');
+const localBooks = await load('services/localBooks.ts');
+const txtParser = await load('services/txtParser.ts');
+const { useSettingsStore } = await load('stores/settings.ts');
 const { matchChapter } = await load('services/reading.ts');
 
 const source = (name) => ({ bookSourceName: name, bookSourceUrl: `https://${name}.invalid`, searchUrl: '/search', ruleSearch: { bookList: '.book', name: 'a@text', author: '.author@text', bookUrl: 'a@href' }, ruleToc: { chapterList: 'a', chapterName: '@text', chapterUrl: '@href' }, ruleContent: { content: '#body' } });
@@ -318,6 +322,91 @@ try {
       assert.equal(ui.readingId, b.id);
     } finally { settings.unmount(); reader.unmount(); }
   });
+  await test('purification save clears the unsaved state', async () => {
+    const { pinia } = freshStores();
+    const panel = await mount('views/PurificationManager.vue', pinia);
+    try {
+      panel.state.addRule();
+      panel.state.rules[0].find = '广告.Conn';
+      assert.equal(panel.state.hasUnsaved, true);
+      assert.equal(await panel.state.save(), true);
+      assert.equal(panel.state.hasUnsaved, false);
+    } finally { panel.unmount(); }
+  });
+  await test('reader chrome reveals only near the top edge', async () => {
+    const { pinia, ui } = freshStores();
+    const app = await mount('App.vue', pinia);
+    try {
+      ui.openBook('reader-test');
+      await nextTick();
+      assert.equal(app.state.readerChromeVisible, true);
+      app.state.trackReaderChrome({ clientY: 120 });
+      assert.equal(app.state.readerChromeVisible, false);
+      app.state.trackReaderChrome({ clientY: 5 });
+      assert.equal(app.state.readerChromeVisible, true);
+    } finally { app.unmount(); }
+  });
+  await test('immersive chrome CSS hides only toolbars, never the app root', async () => {
+    const appSource = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8');
+    const readerSource = await readFile(new URL('../src/views/ReaderView.vue', import.meta.url), 'utf8');
+    assert.match(appSource, /\.app-root\.reader-mode \.subbar \{/);
+    assert.match(appSource, /\.app-root\.reader-mode > \.titlebar \{/);
+    assert.doesNotMatch(readerSource, /:global\(\.app-root\.reader-mode\)/);
+  });
+  await test('local TXT opens without a source and reads persisted chapter text', async () => {
+    const parsed = txtParser.parseTxt(new TextEncoder().encode('第一章\n离线本地正文').buffer);
+    const stored = await localBooks.saveLocalBook({ name: 'Local reader', originalName: 'removed.txt', parsed });
+    const { pinia, library, ui } = freshStores();
+    try {
+      await library.addLocalBook(stored.book, stored.chapters);
+      ui.openBook(stored.book.id);
+      const reader = await mount('views/ReaderView.vue', pinia);
+      try {
+        await until(() => reader.state.rawContent === parsed.text);
+        assert.equal(reader.state.rawContent, parsed.text);
+        assert.equal(reader.state.content, '离线本地正文');
+        assert.equal(reader.state.loadError, '');
+      } finally { reader.unmount(); }
+      await library.remove(stored.book.id);
+    } finally {
+      await localBooks.removeLocalBook(stored.book.id).catch(() => {});
+    }
+  });
+
+  await test('click scrolling uses current line height and ignores drags and selections', async () => {
+    const { pinia, library, sources, ui } = freshStores();
+    const settings = useSettingsStore();
+    settings.clickScrollEnabled = true;
+    settings.clickScrollLines = 5;
+    const s = source('click-scroll'); sources.list = [s]; const b = library.addFromSearch(result(s));
+    library.tocCache[b.id] = [{ title: 'A', url: s.bookSourceUrl + '/a' }]; ui.openBook(b.id);
+    window.fetch = async () => new Response('<div id="body">' + '正文'.repeat(200) + '</div>');
+    const reader = await mount('views/ReaderView.vue', pinia);
+    try {
+      await until(() => !!reader.state.rawContent);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const el = document.createElement('div');
+      const para = document.createElement('p'); para.className = 'para'; para.style.lineHeight = '20px'; el.append(para);
+      Object.defineProperties(el, { clientHeight: { value: 200 }, clientWidth: { value: 300 }, scrollHeight: { value: 1000 } });
+      el.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 300, bottom: 200, width: 300, height: 200, toJSON() {} });
+      reader.state.bodyEl = el;
+      const down = { pointerId: 1, button: 0, clientX: 100, clientY: 150, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, target: el };
+      reader.state.onPointerDown(down); reader.state.onPointerUp(down);
+      reader.state.onBodyClick({ ...down, detail: 1 });
+      assert.equal(el.scrollTop, 100);
+      const dragStart = { ...down, pointerId: 2 };
+      reader.state.onPointerDown(dragStart);
+      reader.state.onPointerMove({ ...dragStart, clientX: 120 });
+      reader.state.onPointerUp({ ...dragStart, clientX: 120 });
+      reader.state.onBodyClick({ ...dragStart, clientX: 120, detail: 1 });
+      assert.equal(el.scrollTop, 100);
+      reader.state.onPointerDown({ ...down, pointerId: 3, clientY: 50 });
+      reader.state.onPointerUp({ ...down, pointerId: 3, clientY: 50 });
+      reader.state.onBodyClick({ ...down, clientY: 50, detail: 1 });
+      assert.equal(el.scrollTop, 0);
+    } finally { reader.unmount(); }
+  });
+
   await test('real tray bridge restores, hides taskbar and closes through granted APIs', async () => {
     const { mockIPC, mockWindows, clearMocks } = await import('@tauri-apps/api/mocks');
     const { emit } = await import('@tauri-apps/api/event');

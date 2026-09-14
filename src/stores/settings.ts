@@ -21,6 +21,10 @@ export interface AppSettings {
   textColor: string;
   /** 滚动到底部自动加载下一章 */
   autoNextChapter: boolean;
+  /** 点击正文上下半区滚动约 N 行。 */
+  clickScrollEnabled: boolean;
+  clickScrollLines: number;
+
   chapterCacheCount: number;
   /** 阅读主题 */
   theme: 'dark' | 'light' | 'sepia';
@@ -40,6 +44,8 @@ const DEFAULTS: AppSettings = {
   fontFamily: '',
   textColor: '',
   autoNextChapter: false,
+  clickScrollEnabled: false,
+  clickScrollLines: 5,
   chapterCacheCount: 50,
   theme: 'dark',
   hideBorder: false,
@@ -58,6 +64,9 @@ export const useSettingsStore = defineStore('settings', {
       this.fontSize = Math.min(28, Math.max(14, Number(this.fontSize) || 18));
       this.lineHeight = Math.min(2.6, Math.max(1.4, Number(this.lineHeight) || 1.9));
       this.loaded = true;
+      this.clickScrollEnabled = this.clickScrollEnabled === true;
+      const clickLines = Number(this.clickScrollLines);
+      this.clickScrollLines = Number.isInteger(clickLines) ? Math.min(30, Math.max(1, clickLines)) : 5;
       this.chapterCacheCount = Number.isInteger(Number(this.chapterCacheCount)) && Number(this.chapterCacheCount) > 0
         ? Number(this.chapterCacheCount) : 50;
       this.$subscribe((mut, state) => {

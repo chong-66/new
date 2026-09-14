@@ -1,32 +1,43 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onBeforeUnmount, ref } from 'vue';
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useUiStore } from '../stores/ui';
 import { useLibraryStore } from '../stores/library';
 import { useSourcesStore } from '../stores/sources';
 import { useSettingsStore } from '../stores/settings';
 import * as engine from '../engine/source';
-import type { Book, Chapter } from '../types';
+import { isLocalBook, type Book, type Chapter } from '../types';
 import { cachedChapterUrls } from '../services/chapterCache';
 import { startChapterCacheTask, type ChapterCacheProgress, type ChapterCacheTask } from '../services/chapterCacheTask';
+import { loadLocalToc, readLocalChapter } from '../services/localBooks';
+import { usePurificationStore } from '../stores/purification';
+import { purifyInWorker, stopAllPurificationTasks } from '../services/purificationTask';
 
 const ui = useUiStore();
 const library = useLibraryStore();
 const sources = useSourcesStore();
 const settings = useSettingsStore();
 
+const purification = usePurificationStore();
 const book = computed<Book | undefined>(() => (ui.readingId ? library.byId(ui.readingId) : undefined));
 const source = computed(() => (book.value ? sources.findByUrl(book.value.sourceUrl) : undefined));
 
+const localBook = computed(() => isLocalBook(book.value));
 const toc = ref<Chapter[]>([]);
 const tocLoading = ref(false);
 const tocError = ref('');
 const idx = ref(0);
 const content = ref('');
 const loading = ref(false);
+const rawContent = ref('');
+const displaySourceContent = ref('');
 const loadError = ref('');
 const showToc = ref(false);
 const showCache = ref(false);
 const cacheCountInput = ref(String(settings.chapterCacheCount));
+const showOriginal = ref(false);
+const purificationError = ref('');
+const purifying = ref(false);
+let purificationPaused = false;
 const cachedUrls = ref(new Set<string>());
 const cacheProgress = ref<ChapterCacheProgress | null>(null);
 const taskRange = ref<{ start: number; end: number; total: number } | null>(null);
@@ -43,6 +54,11 @@ let restoring = false;
 let lastScrollTop = 0;
 
 const cacheRunning = computed(() => cacheProgress.value?.status === 'running');
+let layoutVersion = 0;
+let resizeObserver: ResizeObserver | undefined;
+let pointerGesture: { id: number; x: number; y: number; maxMove: number; layout: number } | undefined;
+let clickReady: { y: number; layout: number } | undefined;
+
 const cacheCount = computed(() => {
   const raw = cacheCountInput.value.trim();
   if (!/^\d+$/.test(raw)) return 0;
@@ -60,7 +76,7 @@ const displayCacheRange = computed(() => cacheRunning.value ? taskRange.value : 
 function savePosition() {
   const b = book.value;
   const el = bodyEl.value;
-  if (!b || !el || loading.value || restoring || !content.value || loadError.value) return;
+  if (!b || !el || loading.value || purifying.value || restoring || !rawContent.value || loadError.value) return;
   if (b.sourceUrl !== renderedSource || b.progress.chapterUrl !== renderedUrl) return;
   const max = el.scrollHeight - el.clientHeight;
   library.updatePosition(b, max > 0 ? el.scrollTop / max : 0);
@@ -73,6 +89,7 @@ async function refreshCacheStatus() {
   const sourceUrl = b.sourceUrl;
   const urls = await cachedChapterUrls(b, s, toc.value);
   if (!disposed && book.value?.id === b.id && book.value.sourceUrl === sourceUrl) cachedUrls.value = urls;
+  if (localBook.value) { cachedUrls.value = new Set(); return; }
 }
 
 function openCache() {
@@ -116,7 +133,7 @@ function startCaching() {
 async function ensureToc(force = false) {
   const b = book.value;
   const s = source.value;
-  if (!b || !s || disposed) return;
+  if (!b || disposed) return;
   tocController?.abort();
   const controller = new AbortController();
   tocController = controller;
@@ -131,6 +148,15 @@ async function ensureToc(force = false) {
         return;
       }
     }
+    if (isLocalBook(b)) {
+      const list = await loadLocalToc(b);
+      controller.signal.throwIfAborted();
+      if (!list.length) throw new Error('本地 TXT 没有章节');
+      toc.value = list;
+      library.tocCache[b.id] = list;
+      return;
+    }
+    if (!s) throw new Error('该书的书源已被删除，请换源后继续阅读');
     // 部分书源的目录页地址藏在书籍详情页规则里
     if (!b.tocUrl && s.ruleBookInfo?.tocUrl) {
       try {
@@ -163,12 +189,67 @@ async function ensureToc(force = false) {
   }
 }
 
+async function displayText(text: string, request: number): Promise<string> {
+  purificationError.value = '';
+  if (!purification.enabled || showOriginal.value || purificationPaused || !purification.rules.some((rule) => rule.enabled)) return text;
+  purifying.value = true;
+  try {
+    const result = await purifyInWorker(text, purification.rules.map((rule) => ({ ...rule })));
+    if (disposed || request !== chapterRequest) throw new DOMException('已取消', 'AbortError');
+    return result.text;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    purificationPaused = true;
+    purificationError.value = (error instanceof Error ? error.message : '净化失败') + '，正在显示原文';
+    return text;
+  } finally {
+    if (request === chapterRequest) purifying.value = false;
+  }
+}
+
+function contentForDisplay(text: string, currentBook: Book, chapter: Chapter) {
+  if (!isLocalBook(currentBook)) return text;
+  const newline = text.indexOf('\n');
+  const firstLine = (newline < 0 ? text : text.slice(0, newline)).trim();
+  if (firstLine !== chapter.title.trim()) return text;
+  return newline < 0 ? '' : text.slice(newline + 1);
+}
+
+async function reapplyPurification() {
+  if (!rawContent.value || loading.value || disposed) return;
+  savePosition();
+  const el = bodyEl.value;
+  const max = el ? el.scrollHeight - el.clientHeight : 0;
+  const ratio = el && max > 0 ? el.scrollTop / max : (book.value?.progress.scrollRatio ?? 0);
+  const request = ++chapterRequest;
+  restoring = true;
+  clickReady = undefined;
+  pointerGesture = undefined;
+  content.value = await displayText(displaySourceContent.value, request).catch(() => displaySourceContent.value);
+  await nextTick();
+  if (disposed || request !== chapterRequest) return;
+  if (el) {
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight) * ratio;
+    lastScrollTop = el.scrollTop;
+  }
+  requestAnimationFrame(() => { if (request === chapterRequest) restoring = false; });
+}
+
+function openPurification() {
+  purification.previewText = rawContent.value;
+  purification.previewLabel = chapterTitle.value;
+  ui.openPanel('purification');
+}
+
 async function loadChapter(i: number, force = false, restoreRatio = 0) {
   const b = book.value;
   const s = source.value;
-  if (!b || !s || !toc.value.length || disposed) return;
+  if (!b || (!s && !isLocalBook(b)) || !toc.value.length || disposed) return;
   savePosition();
+  rawContent.value = '';
+  displaySourceContent.value = '';
   chapterController?.abort();
+  showOriginal.value = false;
   prefetchController?.abort();
   const controller = new AbortController();
   chapterController = controller;
@@ -181,11 +262,14 @@ async function loadChapter(i: number, force = false, restoreRatio = 0) {
   loadError.value = '';
   content.value = '';
   try {
-    const text = await engine.getContent(s, chapter.url, b, { signal: controller.signal, force });
+    const text = isLocalBook(b) ? await readLocalChapter(b, chapter.url) : await engine.getContent(s!, chapter.url, b, { signal: controller.signal, force });
     if (disposed || request !== chapterRequest || controller.signal.aborted) return;
-    if (!text.trim()) throw new Error('正文为空，请重试或换源');
-    content.value = text;
-    renderedSource = s.bookSourceUrl;
+    if (!text.trim()) throw new Error(isLocalBook(b) ? '本地章节正文为空' : '正文为空，请重试或换源');
+    rawContent.value = text;
+    displaySourceContent.value = contentForDisplay(text, b, chapter);
+    content.value = await displayText(displaySourceContent.value, request);
+    if (disposed || request !== chapterRequest || controller.signal.aborted) return;
+    renderedSource = b.sourceUrl;
     renderedUrl = chapter.url;
     library.updateProgress(b, target, chapter, restoreRatio);
     loading.value = false;
@@ -198,7 +282,7 @@ async function loadChapter(i: number, force = false, restoreRatio = 0) {
     }
     requestAnimationFrame(() => { if (request === chapterRequest) restoring = false; });
     const nextCh = toc.value[target + 1];
-    if (nextCh && !cacheRunning.value) {
+    if (nextCh && s && !isLocalBook(b) && !cacheRunning.value) {
       prefetchController = new AbortController();
       void engine.getContent(s, nextCh.url, b, { signal: prefetchController.signal }).catch(() => {});
     }
@@ -209,7 +293,7 @@ async function loadChapter(i: number, force = false, restoreRatio = 0) {
   } finally {
     if (!disposed && request === chapterRequest) {
       loading.value = false;
-      if (!content.value) restoring = false;
+      if (!rawContent.value) restoring = false;
     }
   }
 }
@@ -257,6 +341,72 @@ async function refreshToc() {
   await loadChapter(found >= 0 ? found : (progress.chapterIndex ?? idx.value), false, found >= 0 ? progress.scrollRatio ?? 0 : 0);
 }
 
+function interactionBlocked(target?: EventTarget | null) {
+  return loading.value || purifying.value || restoring || !!loadError.value || !rawContent.value ||
+    ui.ghostHidden || ui.searchOpen || ui.panelOpen || showToc.value || showCache.value ||
+    !!(target as HTMLElement | null)?.closest?.('button, a, input, textarea, select, [contenteditable="true"], [data-no-page-click]');
+}
+function hasTextSelection() {
+  const selection = window.getSelection?.();
+  return !!selection && !selection.isCollapsed;
+}
+function cancelPointer() { pointerGesture = undefined; clickReady = undefined; }
+function onPointerDown(e: PointerEvent) {
+  clickReady = undefined;
+  if (!settings.clickScrollEnabled || e.button !== 0 || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey || interactionBlocked(e.target) || hasTextSelection()) return;
+  pointerGesture = { id: e.pointerId, x: e.clientX, y: e.clientY, maxMove: 0, layout: layoutVersion };
+  bodyEl.value?.setPointerCapture?.(e.pointerId);
+}
+function onPointerMove(e: PointerEvent) {
+  if (!pointerGesture || pointerGesture.id !== e.pointerId) return;
+  pointerGesture.maxMove = Math.max(pointerGesture.maxMove, Math.hypot(e.clientX - pointerGesture.x, e.clientY - pointerGesture.y));
+}
+function onPointerUp(e: PointerEvent) {
+  const gesture = pointerGesture;
+  pointerGesture = undefined;
+  bodyEl.value?.releasePointerCapture?.(e.pointerId);
+  if (!gesture || gesture.id !== e.pointerId || gesture.maxMove > 6 || gesture.layout !== layoutVersion || hasTextSelection() || interactionBlocked(e.target)) return;
+  clickReady = { y: e.clientY, layout: gesture.layout };
+}
+function onBodyClick(e: MouseEvent) {
+  const ready = clickReady;
+  clickReady = undefined;
+  const el = bodyEl.value;
+  if (!ready || e.detail > 1 || ready.layout !== layoutVersion || !el || !settings.clickScrollEnabled || interactionBlocked(e.target) || hasTextSelection()) return;
+  const rect = el.getBoundingClientRect();
+  const insideX = e.clientX - rect.left - el.clientLeft;
+  const insideY = ready.y - rect.top - el.clientTop;
+  if (insideX < 0 || insideX > el.clientWidth || insideY < 0 || insideY > el.clientHeight) return;
+  const paragraph = el.querySelector<HTMLElement>('.para');
+  const lineHeight = Number.parseFloat(getComputedStyle(paragraph ?? el).lineHeight) || settings.fontSize * settings.lineHeight;
+  const direction = insideY < el.clientHeight / 2 ? -1 : 1;
+  const max = Math.max(0, el.scrollHeight - el.clientHeight);
+  const target = Math.min(max, Math.max(0, el.scrollTop + direction * lineHeight * settings.clickScrollLines));
+  if (target === el.scrollTop) return;
+  el.scrollTop = target;
+  savePosition();
+}
+function onLayoutChanged() {
+  layoutVersion++;
+  cancelPointer();
+  requestAnimationFrame(() => { if (bodyEl.value) lastScrollTop = bodyEl.value.scrollTop; });
+}
+async function toggleOriginal() {
+  showOriginal.value = !showOriginal.value;
+  await reapplyPurification();
+}
+async function retryPurification() {
+  purificationPaused = false;
+  showOriginal.value = false;
+  await reapplyPurification();
+}
+
+watch(() => [settings.fontSize, settings.lineHeight], onLayoutChanged);
+watch(() => [purification.enabled, purification.revision], () => {
+  purificationPaused = false;
+  void reapplyPurification();
+});
+
 function onKey(e: KeyboardEvent) {
   if (ui.searchOpen || ui.panelOpen || e.defaultPrevented || e.isComposing) return;
   if (showCache.value) {
@@ -290,7 +440,7 @@ function onBodyScroll() {
   const { scrollTop, scrollHeight, clientHeight } = bodyEl.value;
   const downward = scrollTop > lastScrollTop;
   lastScrollTop = scrollTop;
-  if (!settings.autoNextChapter || restoring || !downward || loading.value || loadError.value || ui.searchOpen || ui.panelOpen || showToc.value || showCache.value || idx.value >= toc.value.length - 1) return;
+  if (!settings.autoNextChapter || restoring || purifying.value || !downward || loading.value || loadError.value || ui.searchOpen || ui.panelOpen || showToc.value || showCache.value || idx.value >= toc.value.length - 1) return;
   if (scrollHeight - scrollTop - clientHeight <= 4 && !autoNextLock) {
     autoNextLock = true;
     loadChapter(idx.value + 1).finally(() => { autoNextLock = false; });
@@ -300,12 +450,17 @@ function onBodyScroll() {
 onMounted(async () => {
   window.addEventListener('keydown', onKey);
   window.addEventListener('wheel', onWheel, { passive: false });
+  window.addEventListener('blur', cancelPointer);
+  if (typeof ResizeObserver !== 'undefined' && bodyEl.value) {
+    resizeObserver = new ResizeObserver(onLayoutChanged);
+    resizeObserver.observe(bodyEl.value);
+  }
   const b = book.value;
   if (!b) {
     ui.closeReading();
     return;
   }
-  if (!source.value) { tocError.value = '该书的书源已被删除，请换源后继续阅读'; return; }
+  if (!isLocalBook(b) && !source.value) { tocError.value = '该书的书源已被删除，请换源后继续阅读'; return; }
   const saved = { ...b.progress };
   idx.value = b.totalChapters ? Math.min(b.progress.chapterIndex, b.totalChapters - 1) : b.progress.chapterIndex;
   await ensureToc();
@@ -321,6 +476,10 @@ onBeforeUnmount(() => {
   tocController?.abort();
   prefetchController?.abort();
   stopCaching();
+  stopAllPurificationTasks();
+  cancelPointer();
+  resizeObserver?.disconnect();
+  window.removeEventListener('blur', cancelPointer);
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('wheel', onWheel);
 });
@@ -335,29 +494,45 @@ onBeforeUnmount(() => {
         <div class="chapter">{{ chapterTitle }}</div>
       </div>
       <div class="ops">
-        <button class="btn" title="换源" @click="changeSource">换源</button>
-        <button class="btn" title="缓存章节" :disabled="!toc.length || tocLoading" @click="openCache">缓存</button>
+        <button v-if="!localBook" class="btn" title="换源" @click="changeSource">换源</button>
+        <button v-if="!localBook" class="btn" title="缓存章节" :disabled="!toc.length || tocLoading" @click="openCache">缓存</button>
+        <button class="btn" title="管理正文净化规则" @click="openPurification">净化</button>
+        <button v-if="purification.enabled && rawContent" class="btn" @click="toggleOriginal">{{ showOriginal ? '恢复净化' : '查看原文' }}</button>
         <button class="btn" title="目录" @click="openToc">目录</button>
       </div>
     </div>
 
-    <div ref="bodyEl" class="body" :style="{ fontSize: settings.fontSize + 'px', lineHeight: settings.lineHeight, color: settings.textColor || 'var(--text)', fontFamily: settings.fontFamily || undefined }" @scroll="onBodyScroll">
+    <div ref="bodyEl" class="body"
+      :style="{ fontSize: settings.fontSize + 'px', lineHeight: settings.lineHeight, color: settings.textColor || 'var(--text)', fontFamily: settings.fontFamily || undefined }"
+      @scroll="onBodyScroll"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="cancelPointer"
+      @click="onBodyClick"
+    >
       <div v-if="tocLoading" class="state">正在加载目录…</div>
       <div v-else-if="tocError" class="state">
         <p>{{ tocError }}</p>
         <button class="btn" @click="refreshToc">重试</button>
-        <button class="btn" @click="changeSource">换源</button>
+        <button v-if="!localBook" class="btn" @click="changeSource">换源</button>
       </div>
       <div v-else-if="loading" class="state">加载中…</div>
       <div v-else-if="loadError" class="state">
         <p>{{ loadError }}</p>
         <button class="btn" @click="loadChapter(idx, true)">重试</button>
-        <button class="btn" @click="changeSource">换源</button>
+        <button v-if="!localBook" class="btn" @click="changeSource">换源</button>
       </div>
       <template v-else>
         <h2 class="ch-title">{{ chapterTitle }}</h2>
-        <p v-for="(p, i) in paragraphs" :key="i" class="para">{{ p }}</p>
-        <div v-if="paragraphs.length" class="end-pager">
+        <div v-if="purificationError" class="purification-notice">
+          {{ purificationError }}
+          <button class="btn" @click="retryPurification">重试</button>
+          <button class="btn" @click="openPurification">管理规则</button>
+        </div>
+        <div v-if="displaySourceContent.trim() && !content.trim()" class="purified-empty">本章内容已被净化规则全部隐藏。<button class="btn" @click="toggleOriginal">查看原文</button></div>
+        <p v-else v-for="(p, i) in paragraphs" :key="i" class="para">{{ p }}</p>
+        <div v-if="rawContent" class="end-pager">
           <button class="btn" :disabled="idx === 0" @click="prev">‹ 上一章</button>
           <span class="pg">{{ idx + 1 }} / {{ toc.length }}</span>
           <button class="btn" :disabled="idx >= toc.length - 1" @click="next">下一章 ›</button>
@@ -369,7 +544,7 @@ onBeforeUnmount(() => {
       <aside class="toc-panel">
         <div class="toc-head">
           <span>目录 · {{ toc.length }} 章</span>
-          <button class="btn" :disabled="tocLoading" title="重新拉取目录" @click="refreshToc">{{ tocLoading ? '刷新中…' : '刷新' }}</button>
+          <button v-if="!localBook" class="btn" :disabled="tocLoading" title="重新拉取目录" @click="refreshToc">{{ tocLoading ? '刷新中…' : '刷新' }}</button>
         </div>
         <div class="toc-list">
           <div
@@ -380,7 +555,7 @@ onBeforeUnmount(() => {
             @click="jump(i)"
           >
             <span>{{ c.title }}</span>
-            <span v-if="cachedUrls.has(c.url)" class="cached-mark">已缓存</span>
+            <span v-if="!localBook && cachedUrls.has(c.url)" class="cached-mark">已缓存</span>
           </div>
         </div>
       </aside>
@@ -435,6 +610,8 @@ onBeforeUnmount(() => {
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
 }
+
+
 .titles {
   flex: 1;
   min-width: 0;
@@ -575,4 +752,14 @@ onBeforeUnmount(() => {
 .cache-progress { width: 100%; margin-top: 8px; accent-color: var(--accent); }
 .cache-main { width: 100%; margin: 4px 0 10px; }
 .cache-hint { font-size: 11px; line-height: 1.5; }
+.purification-notice, .purified-empty {
+  margin-bottom: 14px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.purification-notice .btn, .purified-empty .btn { margin-left: 8px; }
 </style>

@@ -4,15 +4,18 @@ import { useUiStore } from '../stores/ui';
 import { useSettingsStore } from '../stores/settings';
 import { useSourcesStore } from '../stores/sources';
 import { useLibraryStore } from '../stores/library';
+import PurificationManager from './PurificationManager.vue';
 
 const ui = useUiStore();
 const settings = useSettingsStore();
 const sources = useSourcesStore();
 const library = useLibraryStore();
+const purificationManager = ref<InstanceType<typeof PurificationManager>>();
 
 const tabs = [
   { key: 'sources', label: '书源' },
   { key: 'appearance', label: '外观' },
+  { key: 'purification', label: '净化' },
   { key: 'window', label: '窗口' },
   { key: 'data', label: '数据' },
   { key: 'about', label: '关于' },
@@ -20,7 +23,12 @@ const tabs = [
 
 const tab = computed({
   get: () => ui.panelTab,
-  set: (v) => (ui.panelTab = v),
+  set: (v) => {
+    if (purificationManager.value?.isSaving()) { ui.showToast('净化规则正在保存，请稍候'); return; }
+    if (ui.panelTab === 'purification' && v !== 'purification' && purificationManager.value?.hasUnsaved() &&
+        !window.confirm('净化规则尚未保存，放弃修改？')) return;
+    ui.panelTab = v;
+  },
 });
 
 // ---- 书源导入
@@ -124,14 +132,22 @@ function host(url: string) {
 }
 
 // ---- 数据
-function clearShelf() {
-  if (window.confirm('清空书架？阅读进度会一并删除')) library.clear();
+async function clearShelf() {
+  if (!window.confirm('清空书架？阅读进度和应用内保存的本地 TXT 会一并删除，原 TXT 文件不受影响。')) return;
+  try {
+    await library.clear();
+  } catch (error) {
+    ui.showToast(error instanceof Error ? error.message : '清空书架失败', 5000);
+  }
 }
 function clearSources() {
   if (window.confirm('清空全部书源？')) sources.clear();
 }
 
 function close() {
+  if (purificationManager.value?.isSaving()) { ui.showToast('净化规则正在保存，请稍候'); return; }
+  if (tab.value === 'purification' && purificationManager.value?.hasUnsaved() &&
+      !window.confirm('净化规则尚未保存，放弃修改？')) return;
   ui.panelOpen = false;
 }
 function onKey(e: KeyboardEvent) {
@@ -255,6 +271,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKey, true));
               <span class="val">{{ settings.lineHeight.toFixed(1) }}</span>
             </div>
           </label>
+          <div class="opt">
+            <div>
+              <div>点击正文翻页</div>
+              <div class="desc">点击上半区向上、下半区向下，每次约 {{ settings.clickScrollLines }} 行</div>
+            </div>
+            <button class="switch" :class="{ on: settings.clickScrollEnabled }" @click="settings.clickScrollEnabled = !settings.clickScrollEnabled" />
+          </div>
+          <label class="field">
+            <span>每次滚动行数</span>
+            <div class="slider-row">
+              <input v-model.number="settings.clickScrollLines" type="range" min="1" max="30" step="1" :disabled="!settings.clickScrollEnabled" />
+              <span class="val">{{ settings.clickScrollLines }}</span>
+            </div>
+          </label>
           <label class="field">
             <span>正文颜色</span>
             <div class="row">
@@ -287,6 +317,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey, true));
             </div>
           </label>
         </template>
+        <!-- 正文净化 -->
+        <PurificationManager v-else-if="tab === 'purification'" ref="purificationManager" />
+
 
         <!-- 窗口 -->
         <template v-else-if="tab === 'window'">

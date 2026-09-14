@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { watch } from 'vue';
+import { ref, watch } from 'vue';
 import { useUiStore } from './stores/ui';
 import { useSettingsStore } from './stores/settings';
 import TitleBar from './components/TitleBar.vue';
@@ -13,6 +13,17 @@ import { storageStatus, flushStorage } from './services/storage';
 
 const ui = useUiStore();
 const settings = useSettingsStore();
+const readerChromeVisible = ref(false);
+
+function trackReaderChrome(event: PointerEvent) {
+  if (!ui.readingId) return;
+  readerChromeVisible.value = event.clientY <= 96;
+}
+
+watch(() => ui.readingId, (readingId) => {
+  readerChromeVisible.value = !!readingId;
+});
+
 
 // 透明窗口行为
 useWindowBehavior();
@@ -24,7 +35,7 @@ watch(() => settings.theme, (t) => {
 </script>
 
 <template>
-  <div class="app-root" :class="{ ghost: ui.ghostHidden, 'no-border': settings.hideBorder }">
+  <div class="app-root" :class="{ ghost: ui.ghostHidden, 'no-border': settings.hideBorder, 'reader-mode': !!ui.readingId, 'reader-chrome-visible': readerChromeVisible }" @pointermove="trackReaderChrome" @pointerleave="readerChromeVisible = false">
     <TitleBar />
     <main class="main">
       <BookshelfView v-if="!ui.readingId" />
@@ -66,6 +77,25 @@ watch(() => settings.theme, (t) => {
 .app-root.ghost {
   border-color: transparent;
 }
+.app-root.reader-mode > .titlebar {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.app-root.reader-mode.reader-chrome-visible > .titlebar {
+  opacity: 1;
+  pointer-events: auto;
+}
+.app-root.reader-mode .subbar {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.app-root.reader-mode.reader-chrome-visible .subbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* 隐藏边框：去掉外框、圆角以及标题栏/副栏分隔线，完全无缝 */
 .app-root.no-border {
   border: none;

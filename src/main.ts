@@ -9,18 +9,24 @@ import { flushStorage } from './services/storage';
 import { useUiStore } from './stores/ui';
 import { isTauri } from './utils/env';
 import { initializeTray } from './services/tray';
+import { usePurificationStore } from './stores/purification';
+import { stopAllPurificationTasks } from './services/purificationTask';
+import { waitForLocalBookWrites } from './services/localBooks';
+import { stopTxtImportTask } from './services/txtImportTask';
 import { stopAllChapterCacheTasks } from './services/chapterCacheTask';
 
 const app = createApp(App);
 app.use(createPinia());
 async function start() {
   // 加载完成后才允许操作，避免初始化覆盖刚导入的书源或阅读进度。
-  await Promise.all([useSettingsStore().load(), useSourcesStore().load(), useLibraryStore().load()]);
+  await Promise.all([useSettingsStore().load(), useSourcesStore().load(), useLibraryStore().load(), usePurificationStore().load()]);
   if (isTauri) {
     await initializeTray();
   }
   window.addEventListener('pagehide', () => {
-    void stopAllChapterCacheTasks().then(() => flushStorage()).catch(() => {});
+    stopAllPurificationTasks();
+    stopTxtImportTask();
+    void Promise.all([stopAllChapterCacheTasks(), waitForLocalBookWrites()]).then(() => flushStorage()).catch(() => {});
   });
   app.mount('#app');
 }

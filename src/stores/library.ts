@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia';
-import type { Book, Chapter, SearchResult } from '../types';
+import { isLocalBook, type Book, type Chapter, type SearchResult } from '../types';
 import { readJson, writeJson, writeJsonDebounced } from '../services/storage';
 import { clearBookChapterCache } from '../services/chapterCache';
 import { stopAllChapterCacheTasks } from '../services/chapterCacheTask';
+import { loadLocalToc, removeLocalBook } from '../services/localBooks';
 
 const tocFile = (id: string) => `toc_${id}.json`;
 type TocData = { sourceUrl: string; bookUrl: string; chapters: Chapter[] };
@@ -60,12 +61,48 @@ export const useLibraryStore = defineStore('library', {
       this.save();
       return book;
     },
+    async addLocalBook(book: Book, chapters: Chapter[]) {
+      if (!isLocalBook(book)) throw new Error('不是本地 TXT 书籍');
+      if (this.byId(book.id)) return this.byId(book.id)!;
+      this.books.push(book);
+      this.tocCache[book.id] = chapters;
+      try {
+        await writeJson('library.json', this.books);
+      } catch (error) {
+        this.books = this.books.filter((item) => item.id !== book.id);
+        delete this.tocCache[book.id];
+        await writeJson('library.json', this.books).catch(() => {});
+        throw error;
+      }
+      return book;
+    },
     async remove(id: string) {
+      const book = this.byId(id);
+      if (!book) return;
       await stopAllChapterCacheTasks();
-      await clearBookChapterCache({ id });
+      if (!isLocalBook(book)) await clearBookChapterCache({ id });
+      const previousBooks = this.books;
+      const previousToc = this.tocCache[id];
       this.books = this.books.filter((b) => b.id !== id);
       delete this.tocCache[id];
-      this.save();
+      try {
+        await writeJson('library.json', this.books);
+      } catch (error) {
+        this.books = previousBooks;
+        if (previousToc) this.tocCache[id] = previousToc;
+        await writeJson('library.json', this.books).catch(() => {});
+        throw error;
+      }
+      if (isLocalBook(book)) {
+        try {
+          await removeLocalBook(id);
+        } catch (error) {
+          this.books = previousBooks;
+          if (previousToc) this.tocCache[id] = previousToc;
+          await writeJson('library.json', this.books).catch(() => {});
+          throw error;
+        }
+      }
       const { remove: fsRemove, exists } = await import('@tauri-apps/plugin-fs').catch(() => ({}) as any);
       // 浏览器模式下无 fs，静默失败即可
       try {
@@ -79,6 +116,11 @@ export const useLibraryStore = defineStore('library', {
     },
     async getToc(book: Book): Promise<Chapter[] | null> {
       if (this.tocCache[book.id]) return this.tocCache[book.id];
+      if (isLocalBook(book)) {
+        const chapters = await loadLocalToc(book);
+        this.tocCache[book.id] = chapters;
+        return chapters;
+      }
       const disk = await readJson<Chapter[] | TocData | null>(tocFile(book.id), null);
       const chapters = Array.isArray(disk) ? disk : disk?.sourceUrl === book.sourceUrl && disk.bookUrl === book.bookUrl ? disk.chapters : null;
       if (Array.isArray(chapters)) { this.tocCache[book.id] = chapters; return chapters; }
@@ -144,10 +186,17 @@ export const useLibraryStore = defineStore('library', {
     },
     async clear() {
       await stopAllChapterCacheTasks();
-      await Promise.all(this.books.map((book) => clearBookChapterCache(book)));
+      const previousBooks = this.books;
       this.books = [];
       this.tocCache = {};
-      this.save();
+      try {
+        await writeJson('library.json', this.books);
+      } catch (error) {
+        this.books = previousBooks;
+        await writeJson('library.json', this.books).catch(() => {});
+        throw error;
+      }
+      await Promise.all(previousBooks.map((book) => isLocalBook(book) ? removeLocalBook(book.id) : clearBookChapterCache(book)));
     },
   },
 });

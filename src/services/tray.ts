@@ -9,6 +9,10 @@ import { flushStorage } from './storage';
 import { createWindowCloseController } from './windowClose';
 import { stopAllChapterCacheTasks } from './chapterCacheTask';
 
+import { stopAllPurificationTasks } from './purificationTask';
+import { waitForLocalBookWrites } from './localBooks';
+import { stopTxtImportTask } from './txtImportTask';
+import { preparePendingChangesForQuit } from './pendingChanges';
 export async function initializeTray() {
   const win = getCurrentWindow();
   const settings = useSettingsStore();
@@ -24,7 +28,7 @@ export async function initializeTray() {
   const controller = createWindowCloseController({
     trayOnly: () => ui.trayReady && settings.trayOnly,
     hide: () => win.hide(),
-    save: async () => { await stopAllChapterCacheTasks(); await nextTick(); await flushStorage(); },
+    save: async () => { await preparePendingChangesForQuit(); stopTxtImportTask(); stopAllPurificationTasks(); await Promise.all([stopAllChapterCacheTasks(), waitForLocalBookWrites()]); await nextTick(); await flushStorage(); },
     // 保存完成后直接销毁，避免重复触发关闭事件。
     close: () => win.destroy(),
     failed: async () => {

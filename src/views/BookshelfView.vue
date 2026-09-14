@@ -1,30 +1,40 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useLibraryStore } from '../stores/library';
 import { useSourcesStore } from '../stores/sources';
 import { useUiStore } from '../stores/ui';
 import type { Book } from '../types';
 import BookCover from '../components/BookCover.vue';
+import TxtImportDialog from './TxtImportDialog.vue';
 
 const library = useLibraryStore();
 const sources = useSourcesStore();
 const ui = useUiStore();
 
 const books = computed(() => library.sorted);
+const showImport = ref(false);
 
 function open(book: Book) {
   ui.openBook(book.id);
 }
 
-function remove(book: Book, e: MouseEvent) {
+async function remove(book: Book, e: MouseEvent) {
   e.stopPropagation();
-  if (window.confirm(`从书架移除《${book.name}》？`)) library.remove(book.id);
+  if (!window.confirm(`从书架移除《${book.name}》？${book.origin === 'local-txt' ? ' 应用内保存的 TXT 正文也会删除，原文件不受影响。' : ''}`)) return;
+  try {
+    await library.remove(book.id);
+  } catch (error) {
+    ui.showToast(error instanceof Error ? error.message : '移除失败', 5000);
+  }
 }
 </script>
 
 <template>
   <div class="shelf">
     <div v-if="books.length" class="list">
+    <div v-if="books.length" class="shelf-toolbar">
+      <button class="btn" @click="showImport = true">导入 TXT</button>
+    </div>
       <div v-for="b in books" :key="b.id" class="card" @click="open(b)">
         <div class="cover-wrap">
           <BookCover :url="b.coverUrl" :referer="b.bookUrl" :name="b.name" />
@@ -50,9 +60,11 @@ function remove(book: Book, e: MouseEvent) {
       <div class="ops">
         <button class="btn primary" @click="ui.openSearch()">搜索添加</button>
         <button v-if="!sources.list.length" class="btn" @click="ui.openPanel('sources')">导入书源</button>
+        <button class="btn" @click="showImport = true">导入 TXT</button>
       </div>
       <p v-if="!sources.list.length" class="hint">提示：需要先导入阅读 3.0 书源才能搜索</p>
     </div>
+    <TxtImportDialog v-if="showImport" @close="showImport = false" />
   </div>
 </template>
 
@@ -61,6 +73,12 @@ function remove(book: Book, e: MouseEvent) {
   height: 100%;
   overflow-y: auto;
   padding: 10px 12px;
+}
+.shelf-toolbar {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; justify-content: flex-end;
+  padding-bottom: 6px;
+  background: linear-gradient(var(--bg), transparent);
 }
 .card {
   display: flex;
