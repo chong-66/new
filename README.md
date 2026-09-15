@@ -35,7 +35,7 @@ Windows 系统托盘通常在右下角；图标可能位于「向上箭头」折
 实现阅读 3.0 规则子集（见 `src/engine/rule.ts` 头部注释）：
 
 - 支持：Default/CSS 位置规则、`tag@attr`、`@text`/`@ownText`/`@html`/`textNodes`/`all`、`@XPath:`/`//`、`@JSon:`、`@Regex:`、AllInOne、OnlyOne、`<js>…</js>` / `@JS:`、`||`/`&&`/`%%`、`##正则##替换`、关键词及页码表达式、`url,{options}`（method/body/headers/charset）
-- 支持 `ruleSearch` / `ruleBookInfo` / `ruleToc`（含 `nextTocUrl`）/ `ruleContent`（含 `nextContentUrl`、`replaceRegex`）
+- 支持 `ruleSearch` 搜索分页（滚动或点击后继续请求 `{{page}}`）/ `ruleBookInfo` / `ruleToc`（含 `nextTocUrl`）/ `ruleContent`（含 `nextContentUrl`、`replaceRegex`）
 - 不支持：音频/图片类型书源（导入时自动禁用）、`@put`/`@get` 跨规则传值（忽略）、登录/Cookie 复杂场景
 
 ## 开发

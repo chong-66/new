@@ -3,7 +3,7 @@
   "bookSourceUrl": "https://novel.cooks.tw",
   "bookSourceType": 0,
   "enabled": true,
-  "bookSourceComment": "根据用户提供的规则整理，仅文字小说。搜索、详情、目录与正文接口已于2026-09-09抽样验证。",
+  "bookSourceComment": "根据用户提供的规则整理，仅文字小说。搜索、详情、目录与正文接口已于2026-09-15在线验证；搜索每页20条并支持继续翻页。",
   "header": {
     "User-Agent": "Mozilla/5.0 (Android 11; Mobile; rv:147.0) Gecko/147.0 Firefox/147.0",
     "Accept-Language": "zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.6",

@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useUiStore } from '../stores/ui';
 import { useSourcesStore } from '../stores/sources';
 import { useLibraryStore } from '../stores/library';
-import { searchAll, getBookInfo, getToc, searchResultKey } from '../engine/source';
+import { searchAll, getBookInfo, getToc, searchResultKey, dedupeResults } from '../engine/source';
 import { matchChapter } from '../services/reading';
 import type { SearchResult, Chapter } from '../types';
 import BookCover from '../components/BookCover.vue';
@@ -19,8 +19,13 @@ const total = ref(0);
 const allResults = ref<SearchResult[]>([]);
 const failed = ref<string[]>([]);
 const sourceFilter = ref('');  // 空=全部，否则为 bookSourceUrl
+const activeSourceFilter = ref('');
 const searched = ref(false);
-const displayCount = ref(10);
+const displayCount = ref(20);
+const currentPage = ref(1);
+const canFetchMore = ref(false);
+const loadingMore = ref(false);
+const MAX_SEARCH_PAGES = 20;
 const inputEl = ref<HTMLInputElement>();
 const listEl = ref<HTMLElement>();
 const searchTerm = ref('');
@@ -44,14 +49,65 @@ const results = computed(() => allResults.value.slice(0, displayCount.value).map
   const selected = group.alternatives?.find((r) => variantKey(r) === selectedSources.value[groupKey(group)]);
   return selected ? { ...selected, alternatives: group.alternatives } : group;
 }));
-const hasMore = computed(() => allResults.value.length > displayCount.value);
+const hasHiddenResults = computed(() => allResults.value.length > displayCount.value);
+const hasMore = computed(() => hasHiddenResults.value || canFetchMore.value);
 
 function inShelf(r: SearchResult) {
   return library.has(r.bookUrl, r.source.bookSourceUrl);
 }
 
-function loadMore() {
-  displayCount.value = Math.min(allResults.value.length, displayCount.value + 10);
+function variantKeys(list: SearchResult[]) {
+  const keys = new Set<string>();
+  for (const group of list) {
+    const variants = group.alternatives?.length ? group.alternatives : [group];
+    for (const variant of variants) keys.add(variantKey(variant));
+  }
+  return keys;
+}
+
+async function fetchNextPage() {
+  if (searching.value || loadingMore.value || switching.value || !canFetchMore.value || currentPage.value >= MAX_SEARCH_PAGES) return;
+  const page = currentPage.value + 1;
+  const base = allResults.value.slice();
+  const before = variantKeys(base);
+  const controller = new AbortController();
+  searchController?.abort();
+  searchController = controller;
+  const run = searchRun;
+  loadingMore.value = true;
+  cancelled.value = false;
+  done.value = 0;
+  total.value = activeSourceFilter.value ? 1 : sources.enabled.length;
+  try {
+    const response = await searchAll(sources.list, searchTerm.value, (_fresh, pageResults, d, t) => {
+      if (disposed || run !== searchRun) return;
+      done.value = d;
+      total.value = t;
+      allResults.value = dedupeResults([...base, ...pageResults]);
+    }, activeSourceFilter.value || undefined, controller.signal, page);
+    if (disposed || run !== searchRun) return;
+    const merged = dedupeResults([...base, ...response.results]);
+    const after = variantKeys(merged);
+    const added = [...after].some((key) => !before.has(key));
+    allResults.value = merged;
+    failed.value = [...new Set([...failed.value, ...response.failed])];
+    currentPage.value = page;
+    canFetchMore.value = added && response.results.length > 0 && page < MAX_SEARCH_PAGES;
+    displayCount.value = Math.min(merged.length, displayCount.value + 20);
+    if (!added && !response.failed.length) ui.showToast('已经没有更多搜索结果');
+  } catch (e) {
+    if (!controller.signal.aborted && !disposed && run === searchRun) ui.showToast(e instanceof Error ? e.message : '加载下一页失败');
+  } finally {
+    if (run === searchRun) loadingMore.value = false;
+  }
+}
+
+async function loadMore() {
+  if (hasHiddenResults.value) {
+    displayCount.value = Math.min(allResults.value.length, displayCount.value + 20);
+    return;
+  }
+  await fetchNextPage();
 }
 
 async function doSearch() {
@@ -68,25 +124,30 @@ async function doSearch() {
   const run = ++searchRun;
   cancelled.value = false;
   searchTerm.value = k;
+  activeSourceFilter.value = sourceFilter.value;
   selectedSources.value = {};
   prepared.value = undefined;
   switchError.value = '';
   searched.value = true;
   allResults.value = [];
   failed.value = [];
-  displayCount.value = 10;
+  displayCount.value = 20;
+  currentPage.value = 1;
+  canFetchMore.value = false;
+  loadingMore.value = false;
   done.value = 0;
-  total.value = sources.enabled.length;
+  total.value = activeSourceFilter.value ? 1 : sources.enabled.length;
   try {
     const r = await searchAll(sources.list, k, (_fresh, all, d, t) => {
       if (disposed || run !== searchRun) return;
       done.value = d;
       total.value = t;
       allResults.value = all;
-    }, sourceFilter.value || undefined, controller.signal);
+    }, activeSourceFilter.value || undefined, controller.signal);
     if (disposed || run !== searchRun) return;
     allResults.value = r.results;
     failed.value = r.failed;
+    canFetchMore.value = r.results.length > 0 && currentPage.value < MAX_SEARCH_PAGES;
   } catch (e) {
     if (!controller.signal.aborted && !disposed && run === searchRun) ui.showToast(e instanceof Error ? e.message : '搜索失败');
   } finally {
@@ -97,8 +158,9 @@ async function doSearch() {
 function stopSearch() {
   searchController?.abort();
   searchRun++;
-  if (searching.value) cancelled.value = true;
+  if (searching.value || loadingMore.value) cancelled.value = true;
   searching.value = false;
+  loadingMore.value = false;
 }
 
 // 滚动到底部自动加载更多
@@ -106,7 +168,7 @@ function onScroll() {
   if (!listEl.value || !hasMore.value) return;
   const { scrollTop, scrollHeight, clientHeight } = listEl.value;
   if (scrollHeight - scrollTop - clientHeight < 80) {
-    loadMore();
+    void loadMore();
   }
 }
 
@@ -212,7 +274,7 @@ onUnmounted(() => {
   <div class="mask" @click.self="close">
     <div class="panel">
       <div class="bar">
-        <select v-model="sourceFilter" class="srcsel" :disabled="searching || switching" aria-label="搜索书源">
+        <select v-model="sourceFilter" class="srcsel" :disabled="searching || loadingMore || switching" aria-label="搜索书源">
           <option value="">全部书源 ({{ sources.enabled.length }})</option>
           <option v-for="s in sources.enabled" :key="s.bookSourceUrl" :value="s.bookSourceUrl">
             {{ s.bookSourceName }}
@@ -226,8 +288,8 @@ onUnmounted(() => {
           placeholder="书名 / 作者"
           @keydown.enter="doSearch"
         />
-        <button class="btn primary" :disabled="switching" @click="searching ? stopSearch() : doSearch()">
-          {{ searching ? '停止' : '搜索' }}
+        <button class="btn primary" :disabled="switching" @click="searching || loadingMore ? stopSearch() : doSearch()">
+          {{ searching || loadingMore ? '停止' : '搜索' }}
         </button>
         <button class="btn" @click="close">✕</button>
       </div>
@@ -249,8 +311,8 @@ onUnmounted(() => {
         <span v-if="failed.length" class="dim">（{{ failed.length }} 个书源请求失败）</span>
       </div>
       <div v-else-if="searching || allResults.length" class="status">
-        {{ searching ? `已搜 ${done}/${total} 个源 · ` : '' }}共 {{ allResults.length }} 条结果
-        <span v-if="searching" class="dim">（仍在搜索...）</span>
+        {{ searching || loadingMore ? `第 ${loadingMore ? currentPage + 1 : currentPage} 页 · 已搜 ${done}/${total} 个源 · ` : '' }}共 {{ allResults.length }} 条结果
+        <span v-if="searching || loadingMore" class="dim">（仍在搜索...）</span>
         <span v-else-if="failed.length" class="dim">（{{ failed.length }} 个源失败）</span>
         <span v-if="cancelled" class="dim">（搜索已停止）</span>
       </div>
@@ -285,7 +347,9 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <button v-if="hasMore" class="more-row btn" @click="loadMore">加载更多（{{ displayCount }}/{{ allResults.length }}）</button>
+        <button v-if="hasMore" class="more-row btn" :disabled="loadingMore" @click="loadMore">
+          {{ loadingMore ? `正在搜索第 ${currentPage + 1} 页…` : hasHiddenResults ? `显示更多（${displayCount}/${allResults.length}）` : `搜索下一页（当前第 ${currentPage} 页）` }}
+        </button>
       </div>
     </div>
   </div>

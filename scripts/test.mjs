@@ -139,7 +139,18 @@ try {
     s.ruleContent.content = '#new';
     assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'new');
   });
-  await test('Legado URL templates support encoded keys and page expressions', () => {
+  await test('search pagination passes the requested page to Legado URL templates', async () => {
+    let requested = '';
+    const paged = { ...source('paged'), searchUrl: '/search?q={{key}}&p={{page}}' };
+    window.fetch = async (url) => {
+      requested = String(url);
+      return new Response('<div class="book"><a href="/book/page-2">Page Two</a><span class="author">Author</span></div>');
+    };
+    const results = await engine.searchSource(paged, 'Example', undefined, 2);
+    assert.match(requested, /[?&]p=2(?:&|$)/);
+    assert.equal(results[0].name, 'Page Two');
+  });
+await test('Legado URL templates support encoded keys and page expressions', () => {
     assert.equal(
       template.expandTemplate('/search?q={{java.encodeURI(key)}}&start={{(page-1)*20}}', { key: '测试 a', page: 3 }),
       '/search?q=%E6%B5%8B%E8%AF%95%20a&start=40',

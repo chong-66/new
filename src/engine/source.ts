@@ -42,11 +42,11 @@ export function isTextSource(source: BookSource): boolean {
 
 // ---------------------------------------------------------------- 搜索
 
-export function searchSource(source: BookSource, key: string, signal?: AbortSignal): Promise<SearchResult[]> {
-  return withTimeout((scoped) => searchSourceImpl(source, key, scoped), signal, 25000);
+export function searchSource(source: BookSource, key: string, signal?: AbortSignal, page = 1): Promise<SearchResult[]> {
+  return withTimeout((scoped) => searchSourceImpl(source, key, scoped, page), signal, 25000);
 }
 
-async function searchSourceImpl(source: BookSource, key: string, signal: AbortSignal): Promise<SearchResult[]> {
+async function searchSourceImpl(source: BookSource, key: string, signal: AbortSignal, page: number): Promise<SearchResult[]> {
   if (!source.searchUrl || !source.ruleSearch?.bookList) {
     throw new Error('书源缺少搜索规则');
   }
@@ -61,14 +61,14 @@ async function searchSourceImpl(source: BookSource, key: string, signal: AbortSi
       baseUrl: source.bookSourceUrl,
       source: { ...source },
       key,
-      page: 1,
+      page,
     };
     rawUrl = await evalRule(rawUrl, jsCtx);
     if (!rawUrl) throw new Error('JS 返回空');
   }
 
   // Step 2: 先展开模板 {{key}}/{{page}}，再处理相对路径
-  const expanded = expandTemplate(rawUrl, { key, page: 1 });
+  const expanded = expandTemplate(rawUrl, { key, page });
 
   // Step 3: 拆分 ",{options}" 后缀（阅读3.0 格式），只对纯 URL 做相对路径解析
   let urlPart = expanded;
@@ -88,11 +88,11 @@ async function searchSourceImpl(source: BookSource, key: string, signal: AbortSi
   }
 
   const finalUrl = urlPart + optSuffix;
-  const req = parseUrlWithOptions(finalUrl, { key, page: 1 });
+  const req = parseUrlWithOptions(finalUrl, { key, page });
   const headers = { ...sourceHeaders(source), ...req.headers };
   const html = await fetchText(req.url, { method: req.method, headers, body: req.body, charset: req.charset, signal });
   const parsed = parseResponse(html);
-  const ctx: RuleCtx = { ...baseCtx(source, req.url), ...parsed, raw: html, key, page: 1, signal };
+  const ctx: RuleCtx = { ...baseCtx(source, req.url), ...parsed, raw: html, key, page, signal };
 
   const items = await evalRuleList(source.ruleSearch.bookList, ctx);
   const out: SearchResult[] = [];
@@ -155,6 +155,7 @@ export async function searchAll(
   onResult?: (fresh: SearchResult[], all: SearchResult[], done: number, total: number) => void,
   sourceFilter?: string,  // 指定书源 bookSourceUrl，为空则搜全部
   signal?: AbortSignal,
+  page = 1,
 ): Promise<{ results: SearchResult[]; failed: string[] }> {
   let enabled = sources.filter((s) => s.enabled !== false && isTextSource(s) && s.searchUrl);
   if (sourceFilter) enabled = enabled.filter((s) => s.bookSourceUrl === sourceFilter);
@@ -169,7 +170,7 @@ export async function searchAll(
       while (queue.length && !signal?.aborted) {
         const s = queue.shift()!;
         try {
-          const fresh = await searchSource(s, key, signal);
+          const fresh = await searchSource(s, key, signal, page);
           signal?.throwIfAborted();
           results.push(...fresh);
         } catch (e) {
