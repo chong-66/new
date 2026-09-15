@@ -246,6 +246,31 @@ await test('Legado URL templates support encoded keys and page expressions', () 
     assert.equal(info.author, '作者甲');
     assert.equal(info.tocUrl, alice.bookSourceUrl + '/novel/1/toc');
   });
+  await test('the Alice source keeps next-chapter links out of same-chapter pagination', async () => {
+    const alice = JSON.parse(await readFile(new URL('../sources/alicesw-format-fixed.json', import.meta.url), 'utf8'));
+    let chapterRequests = 0;
+    window.fetch = async (url) => {
+      if (String(url).endsWith('/toc')) {
+        return new Response(`<ul class="mulu_list">
+          <li><a href="/book/1/chapter-1.html">第一章</a></li>
+          <li><a href="/book/1/chapter-2.html">第二章</a></li>
+        </ul>`);
+      }
+      chapterRequests++;
+      return new Response(`<h1 class="j_chapterName">第一章</h1>
+        <div class="j_readContent"><p>第一章正文</p></div>
+        <a id="j_chapterNext" href="/book/1/chapter-2.html">下一章</a>`);
+    };
+    const chapters = await engine.getToc(alice, {
+      name: '测试书',
+      bookUrl: alice.bookSourceUrl + '/novel/1',
+      tocUrl: alice.bookSourceUrl + '/toc',
+    });
+    assert.deepEqual(chapters.map((item) => item.title), ['第一章', '第二章']);
+    const content = await engine.getContent(alice, chapters[0].url);
+    assert.equal(content, '第一章正文');
+    assert.equal(chapterRequests, 1);
+  });
   await test('persistent chapter cache survives memory eviction and stays isolated by book URL', async () => {
     const { library } = freshStores();
     const s = source('persistent-cache');

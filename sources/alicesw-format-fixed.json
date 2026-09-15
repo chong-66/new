@@ -3,7 +3,7 @@
   "bookSourceUrl": "https://www.alicesw.com",
   "bookSourceType": 0,
   "bookSourceGroup": "自制,小说",
-  "bookSourceComment": "2026-08-01 按 alicesw.com 当前 HTML 结构编写。未写入个人 Cookie；如站点改为强制登录，请在书源 header 中自行加入 Cookie。",
+  "bookSourceComment": "2026-09-15 按 alicesw.com 当前 HTML 结构验证，已修正将“下一章”误作同章分页导致多章合并的问题。未写入个人 Cookie；如站点改为强制登录，请在书源 header 中自行加入 Cookie。",
   "enabled": true,
   "enabledExplore": true,
   "enabledCookieJar": true,
@@ -50,7 +50,6 @@
   },
   "ruleContent": {
     "title": "@css:.j_chapterName@text",
-    "content": "@css:.j_readContent p@text",
-    "nextContentUrl": "@css:#j_chapterNext@href"
+    "content": "@css:.j_readContent p@text"
   }
 }
