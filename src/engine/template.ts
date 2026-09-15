@@ -14,17 +14,27 @@ export interface UrlWithOptions {
   charset?: string;
 }
 
-/** 展开 {{key}} / {{page}} / {{page-1}} 等模板变量 */
+/**
+ * 展开阅读 3.0 URL 模板。除 {{key}}/{{page}} 外，兼容教程中常见的
+ * {{java.encodeURI(key)}}、{{(page-1)*20}} 和简单的 page 三元表达式。
+ * 这里只计算经过白名单限制的数字表达式，不执行书源提供的任意代码。
+ */
 export function expandTemplate(tpl: string, vars: { key?: string; page?: number }): string {
   return tpl.replace(/\{\{(.*?)\}\}/g, (_, expr: string) => {
     const e = expr.trim();
     if (e === 'key') return encodeURIComponent(vars.key ?? '');
     if (e === 'page') return String(vars.page ?? 1);
-    const m = e.match(/^page\s*([+-])\s*(\d+)$/);
-    if (m) {
-      const base = vars.page ?? 1;
-      const n = parseInt(m[2], 10);
-      return String(m[1] === '-' ? base - n : base + n);
+    if (/^(?:java\.)?encodeURI(?:Component)?\(\s*key(?:\s*,\s*['"][^'"]+['"])?\s*\)$/i.test(e)) {
+      return encodeURIComponent(vars.key ?? '');
+    }
+    // 教程里的页码表达式只需要 page、数字、算术和三元运算。
+    if (/^[\d\s()+\-*/%?:<>=!&|'".page]+$/.test(e) && /\bpage\b/.test(e)) {
+      try {
+        const value = new Function('page', `"use strict"; return (${e});`)(vars.page ?? 1);
+        return value === undefined || value === null ? '' : String(value);
+      } catch {
+        return '';
+      }
     }
     return '';
   });

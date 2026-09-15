@@ -28,13 +28,13 @@ Windows 系统托盘通常在右下角；图标可能位于「向上箭头」折
 
 已适配用户提供的 cooks 小说接口：[可导入书源](sources/cooks.json)。复制文件全部内容，到「设置 → 书源」粘贴导入。该文件已清理粘贴转义；旧版需升级至 v0.1.3。若存在相同地址的旧规则，请先在书源列表删除旧项后导入。
 
-新增支持：`jsLib` 公共函数、JSONPath 后接 `<js>` / `@js:`、`{{$.字段}}` URL 模板、详情 `init`、`cache.putMemory/getFromMemory`。内存缓存按书源及书籍隔离，重启后不保留。仅支持文字小说，仍不是完整的阅读运行环境。
+已按 Legado 规则教程补充常用兼容层：URL 支持 `{{java.encodeURI(key)}}`、页码算术/三元表达式；Default 规则支持 class/id/tag 链和位置选择；`@css:` 支持 `:eq()`/`:lt()`/`:gt()`；`@XPath:` 与 `//` 可直接使用；AllInOne `:`/`-:` 支持 `$1` 等捕获组；支持 OnlyOne、`%%`、`jsLib`、JSONPath 后接 JS、详情 `init`、`cache.putMemory/getFromMemory`，以及 `java.ajax/get/post`。内存变量按书源及书籍隔离，重启后不保留。仅支持文字小说，仍不是完整的 Legado 运行环境。
 
 创建自己的书源：见 [创建书源说明](docs/创建书源.md)、[通用模板](sources/template.json) 和 [本地可运行示例](sources/local-example.json)。
 
 实现阅读 3.0 规则子集（见 `src/engine/rule.ts` 头部注释）：
 
-- 支持：CSS 选择器（`tag@attr`、`@text`/`@ownText`/`@html`/`textNodes`）、`@XPath:`、`@JSon:`、`@Regex:`、`<js>…</js>` / `@JS:`（async 环境，内置 `java.ajax()`）、`||` 多方案、`&&` 拼接、`##正则##替换`、`{{key}}`/`{{page}}` 模板、`url,{options}`（method/body/headers/charset）
+- 支持：Default/CSS 位置规则、`tag@attr`、`@text`/`@ownText`/`@html`/`textNodes`/`all`、`@XPath:`/`//`、`@JSon:`、`@Regex:`、AllInOne、OnlyOne、`<js>…</js>` / `@JS:`、`||`/`&&`/`%%`、`##正则##替换`、关键词及页码表达式、`url,{options}`（method/body/headers/charset）
 - 支持 `ruleSearch` / `ruleBookInfo` / `ruleToc`（含 `nextTocUrl`）/ `ruleContent`（含 `nextContentUrl`、`replaceRegex`）
 - 不支持：音频/图片类型书源（导入时自动禁用）、`@put`/`@get` 跨规则传值（忽略）、登录/Cookie 复杂场景
 

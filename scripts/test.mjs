@@ -18,6 +18,7 @@ const { createPinia, setActivePinia } = await import('pinia');
 const engine = await load('engine/source.ts');
 const http = await load('engine/http.ts');
 const rule = await load('engine/rule.ts');
+const template = await load('engine/template.ts');
 const storage = await load('services/storage.ts');
 const chapterCache = await load('services/chapterCache.ts');
 const { startChapterCacheTask } = await load('services/chapterCacheTask.ts');
@@ -137,6 +138,89 @@ try {
     assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'old');
     s.ruleContent.content = '#new';
     assert.equal(await engine.getContent(s, `${s.bookSourceUrl}/chapter`), 'new');
+  });
+  await test('Legado URL templates support encoded keys and page expressions', () => {
+    assert.equal(
+      template.expandTemplate('/search?q={{java.encodeURI(key)}}&start={{(page-1)*20}}', { key: '测试 a', page: 3 }),
+      '/search?q=%E6%B5%8B%E8%AF%95%20a&start=40',
+    );
+    assert.equal(template.expandTemplate('/list/{{page==1?"":page}}', { page: 1 }), '/list/');
+  });
+  await test('Legado CSS positions, Default chains and list interleaving work', async () => {
+    const doc = new DOMParser().parseFromString(`
+      <div class="novel_info"><p><a>A</a></p><p><a>B</a></p><p><a>C</a></p></div>
+      <div class="items"><a>one</a><a>two</a><a>three</a></div>
+      <i class="left">L1</i><i class="left">L2</i><i class="right">R1</i><i class="right">R2</i>`, 'text/html');
+    const ctx = { baseUrl: 'https://legado.invalid/book', doc, raw: doc.documentElement.outerHTML };
+    assert.equal(await rule.evalRule('@css:.novel_info p:eq(1) a@text', ctx), 'B');
+    assert.equal(await rule.evalRule('@css:.novel_info p:eq(1)>a@text', ctx), 'B');
+    assert.equal(await rule.evalRule('class.items@tag.a.1@text', ctx), 'two');
+    assert.equal(await rule.evalRule('##one##1###', { ...ctx, raw: 'one one' }), '1 one');
+    assert.equal(await rule.evalRule('@js:result.includes("payload") ? "ok" : ""', { ...ctx, raw: 'payload' }), 'ok');
+    const interleaved = await rule.evalRuleList('.left%%.right', ctx);
+    assert.deepEqual(interleaved.map((item) => item.textContent), ['L1', 'R1', 'L2', 'R2']);
+  });
+  await test('Legado JavaScript result and request helpers use source context', async () => {
+    let captured;
+    window.fetch = async (url, options) => {
+      captured = { url: String(url), options };
+      return new Response('posted');
+    };
+    const ctx = {
+      baseUrl: 'https://legado-js.invalid/book/1',
+      raw: 'payload',
+      source: { header: '{"X-Source":"source-value"}' },
+    };
+    assert.equal(await rule.evalRule('@js:result.includes("payload") ? "ok" : ""', ctx), 'ok');
+    assert.equal(await rule.evalRule('<js>return await java.post("/api", "a=1", {"X-Rule":"rule-value"});</js>', ctx), 'posted');
+    assert.equal(captured.url, 'https://legado-js.invalid/api');
+    assert.equal(captured.options.method, 'POST');
+    assert.equal(captured.options.body, 'a=1');
+    assert.equal(captured.options.headers['X-Source'], 'source-value');
+    assert.equal(captured.options.headers['X-Rule'], 'rule-value');
+    assert.equal(await rule.evalRule('<js>java.put("id", "42"); return java.get("id");</js>', ctx), '42');
+  });
+  await test('Legado raw XPath stays scoped to each search item', async () => {
+    const s = {
+      ...source('legado-xpath'),
+      ruleSearch: { bookList: '//dl', name: '//h3/a/text()', author: '//dd[2]/text()', bookUrl: '//h3/a/@href' },
+    };
+    window.fetch = async () => new Response(`
+      <dl><h3><a href="/a">Book A</a></h3><dd>kind</dd><dd>Author A</dd></dl>
+      <dl><h3><a href="/b">Book B</a></h3><dd>kind</dd><dd>Author B</dd></dl>`);
+    const results = await engine.searchSource(s, 'book');
+    assert.deepEqual(results.map((item) => [item.name, item.author]), [['Book A', 'Author A'], ['Book B', 'Author B']]);
+  });
+  await test('Legado AllInOne captures build chapters and can reverse the list', async () => {
+    const s = {
+      ...source('legado-regex'),
+      ruleToc: { chapterList: '-:href="([^"]+)">([^<]+)', chapterName: '$2', chapterUrl: '$1' },
+    };
+    window.fetch = async () => new Response('<a href="/read/1.html">First</a><a href="/read/2.html">Second</a>');
+    const chapters = await engine.getToc(s, { name: 'Book', bookUrl: s.bookSourceUrl + '/book', tocUrl: s.bookSourceUrl + '/toc' });
+    assert.deepEqual(chapters.map((item) => item.title), ['Second', 'First']);
+    assert.equal(chapters[0].url, s.bookSourceUrl + '/read/2.html');
+  });
+  await test('the Alice Legado source expands search and Jsoup eq detail rules', async () => {
+    const alice = JSON.parse(await readFile(new URL('../sources/alicesw-format-fixed.json', import.meta.url), 'utf8'));
+    let requested = '';
+    window.fetch = async (url) => {
+      requested = String(url);
+      return new Response(`<div class="list-group-item">
+        <h5><a href="/novel/1">1. 测试书</a><small>[都市]</small></h5>
+        <p class="mb-1"><a>作者甲</a>　字数：12万</p><p class="timedesc">更新时间：今天</p>
+        <div class="content-txt">简介文字</div></div>`);
+    };
+    const results = await engine.searchSource(alice, '测试');
+    assert.match(requested, /q=%E6%B5%8B%E8%AF%95/);
+    assert.equal(results[0].name, '测试书');
+    window.fetch = async () => new Response(`<h1 class="novel_title">测试书</h1>
+      <div class="novel_info"><p><a>作者甲</a></p><p><a>都市</a></p><p>状态</p><p>字 数：12万</p><p>更新</p><p><a>末章</a></p></div>
+      <div class="pic"><img src="/cover.jpg"></div><div class="jianjie"><p>详情简介</p></div>
+      <div class="book_newchap"><div class="tit"><a href="/novel/1/toc">目录</a></div></div>`);
+    const info = await engine.getBookInfo(alice, alice.bookSourceUrl + '/novel/1');
+    assert.equal(info.author, '作者甲');
+    assert.equal(info.tocUrl, alice.bookSourceUrl + '/novel/1/toc');
   });
   await test('persistent chapter cache survives memory eviction and stays isolated by book URL', async () => {
     const { library } = freshStores();

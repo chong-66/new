@@ -1,19 +1,16 @@
 import { jsonQuery, jsonQueryList } from './jsonpath';
-import { resolveUrl } from './template';
+import { parseUrlWithOptions, resolveUrl } from './template';
 import { fetchText } from './http';
 import { parse } from '@babel/parser';
 
 /**
- * 阅读 3.0 规则解析器（子集）。
- * 支持：
- *   - CSS 选择器（默认）：`div.list li`、`tag.a@href`、`@text`/`@ownText`/`@html`
- *   - `@XPath:` XPath 表达式（浏览器原生 document.evaluate）
- *   - `@JSon:` JSONPath 子集
- *   - `<js>...</js>` / `@JS:` JS 代码（async 环境，可用 java.ajax()）
- *   - `规则1||规则2` 依次尝试取第一个非空结果
- *   - `规则1&&规则2` 结果拼接
- *   - `规则##正则##替换` 结果替换（替换可省略表示删除）
- * 已知限制：@put/@get 跨规则传值会被忽略（直接剔除）。
+ * 阅读 3.0 常用规则兼容层：
+ * - Default/CSS 链、位置、数组筛选及 text/html/属性取值
+ * - `@css:` 的 eq/lt/gt/first/last 位置选择
+ * - `@XPath:` 或 `//`、JSONPath 子集、AllInOne/OnlyOne 正则
+ * - `<js>...</js>` / `@js:`、`||`/`&&`/`%%`、正则替换
+ *
+ * 仍不提供完整 Android/Java、WebView、登录及 CookieJar 运行环境。
  */
 
 export interface RuleCtx {
@@ -28,6 +25,10 @@ export interface RuleCtx {
   json?: unknown;
   /** 当前文本（JS 模式的 result） */
   text?: string;
+  /** 当前网络响应原文，供 AllInOne/OnlyOne 正则使用 */
+  raw?: string;
+  /** AllInOne 正则列表项的完整匹配及捕获组 */
+  captures?: string[];
   /** 书籍信息（JS 规则可用） */
   book?: Record<string, unknown>;
   /** 书源信息（JS 规则可用） */
@@ -38,7 +39,7 @@ export interface RuleCtx {
 
 const MODE_RE = /^@(XPath|JSon|JSON|JS|Css|CSS|Regex):/i;
 /** 规则末尾的取值属性（仅匹配已知属性名，避免把 @a/@li/@dd 等标签名当成属性） */
-const ATTR_RE = /@(text|ownText|html|outerHtml|textNodes|href|src|src\d?|alt|title|class|id|style|data-[\w-]+|content|value|placeholder|type|rel)\s*$/i;
+const ATTR_RE = /@(text|ownText|html|outerHtml|textNodes|href|src|src\d?|alt|title|class|id|style|data-[\w-]+|content|value|placeholder|type|rel|all)\s*$/i;
 
 /** 取字符串结果（详情/名称等字段） */
 export async function evalRule(rule: string | undefined, ctx: RuleCtx): Promise<string> {
@@ -73,6 +74,15 @@ async function evalRuleInternal(rule: string | undefined, ctx: RuleCtx, asList: 
   }
   let r = stripPutGet(rule.trim());
 
+  // OnlyOne：直接对当前响应原文执行一次规则，例如 ##正则##替换###。
+  if (r.startsWith('##')) {
+    const core = r.endsWith('###') ? r.slice(2, -3) : r.slice(2);
+    const divider = core.indexOf('##');
+    const regex = divider >= 0 ? core.slice(0, divider) : core;
+    const by = divider >= 0 ? core.slice(divider + 2) : '';
+    const input = ctx.raw ?? ctx.text ?? ctx.element?.outerHTML ?? '';
+    return [applyReplaceOnce(input, { regex, by })];
+  }
   // 末尾替换规则：selector##regex##replacement（<js> 整段规则不拆）
   let replace: { regex: string; by: string } | null = null;
   if (!r.startsWith('<js>') && r.includes('##')) {
@@ -88,6 +98,19 @@ async function evalRuleInternal(rule: string | undefined, ctx: RuleCtx, asList: 
   const alternatives = splitTop(r, '||');
   for (const alt of alternatives) {
     try {
+      // %% 按列表下标交错合并。
+      const interleaved = splitTop(alt, '%%');
+      if (interleaved.length > 1) {
+        const lists = await Promise.all(interleaved.map((part) => evalRuleInternal(part, ctx, true)));
+        const merged: unknown[] = [];
+        const length = Math.max(0, ...lists.map((list) => list.length));
+        for (let i = 0; i < length; i++) {
+          for (const list of lists) if (i < list.length) merged.push(list[i]);
+        }
+        return replace
+          ? merged.map((value) => applyReplace(value instanceof Element ? htmlToText(value.innerHTML) : stringify(value), replace!))
+          : merged;
+      }
       // && 拼接
       const segments = splitTop(alt, '&&');
       const segResults: string[] = [];
@@ -122,7 +145,8 @@ async function evalRuleInternal(rule: string | undefined, ctx: RuleCtx, asList: 
 /** 单段规则求值；asList=true 时保留数组结构 */
 async function evalSegment(seg: string, ctx: RuleCtx, asList: boolean): Promise<unknown[]> {
   if (!seg) return [];
-
+  const capture = seg.trim().match(/^\$(\d+)$/);
+  if (capture && ctx.captures) return [ctx.captures[Number(capture[1])] ?? ''];
   // URL 模板中的 JSONPath 占位符：/api/xxx?book_id={$.book_id}
   if (ctx.json !== undefined && /\{\{?\$/.test(seg)) {
     seg = seg.replace(/\{\{(\$[^{}]+)\}\}|\{(\$[^{}]+)\}/g, (_, double, single) => {
@@ -146,9 +170,16 @@ async function evalSegment(seg: string, ctx: RuleCtx, asList: boolean): Promise<
   if (m) {
     mode = m[1].toLowerCase();
     body = seg.slice(m[0].length).trim();
+  } else if (seg.startsWith('@@')) {
+    mode = 'css';
+    body = seg.slice(2).trim();
   } else if (seg.startsWith('@JS:') || seg.startsWith('@js:')) {
     mode = 'js';
     body = seg.slice(4).trim();
+  } else if (/^-?:/.test(body)) {
+    mode = 'allinone';
+  } else if (/^(?:\/\/|\.\/\/)/.test(body)) {
+    mode = 'xpath';
   } else if (ctx.json !== undefined && /^\$/.test(body)) {
     mode = 'json';
   }
@@ -164,6 +195,8 @@ async function evalSegment(seg: string, ctx: RuleCtx, asList: boolean): Promise<
     }
     case 'xpath':
       return xpathEval(body, ctx, asList);
+    case 'allinone':
+      return regexListEval(body, ctx, asList);
     case 'regex': {
       const text = ctx.text ?? elementText(ctx.element) ?? '';
       const re = new RegExp(body, 'gs');
@@ -176,18 +209,10 @@ async function evalSegment(seg: string, ctx: RuleCtx, asList: boolean): Promise<
 }
 
 function cssEval(selector: string, ctx: RuleCtx, asList: boolean): unknown[] {
-  const root: (Document & ParentNode) | (Element & ParentNode) | null =
-    ctx.element ?? ctx.doc ?? null;
+  const root: (Document & ParentNode) | (Element & ParentNode) | null = ctx.element ?? ctx.doc ?? null;
   if (!root) return [];
 
-  let sel = selector;
-
-  // 阅读 3.0 CSS 简写转标准 CSS（用于基础选择器）
-  sel = sel.replace(/(^|\s)class\.([\w-]+)/g, '$1.$2');
-  sel = sel.replace(/(^|\s)id\.([\w-]+)/g, '$1#$2');
-  sel = sel.replace(/(^|\s)tag\.([\w-]+)/g, '$1$2');
-
-  // 先拆分末尾取值属性（@text/@href/...），它不属于管道链
+  let sel = selector.trim();
   let attr = '';
   const attrMatch = sel.match(ATTR_RE);
   if (attrMatch && !sel.endsWith(']')) {
@@ -195,107 +220,221 @@ function cssEval(selector: string, ctx: RuleCtx, asList: boolean): unknown[] {
     sel = sel.slice(0, attrMatch.index).trim();
   }
 
-  // 管道链拆分：baseSel @ step1 @ step2 ...
-  // 如 "ul@li!-1@a" → base="ul", chain=["li!-1", "a"]
-  // 如 "div.list dd@tag.a" → base="div.list dd", chain=["tag.a"]
   const parts = sel.split('@');
-  let baseSel = parts[0].trim();
-  const chain = parts.slice(1).map((s) => s.trim()).filter(Boolean);
-
-  // ---- 1. 执行基础 CSS 选择器 ----
-  let els: Element[];
-  if (!baseSel || baseSel === ':root' || baseSel === '.') {
-    els = ctx.element ? [ctx.element] : [];
-  } else {
-    try {
-      els = Array.from(root.querySelectorAll(baseSel));
-      if (ctx.element && ctx.element.matches(baseSel)) els.unshift(ctx.element);
-    } catch {
-      els = [];
-    }
+  const base = parts.shift()?.trim() ?? '';
+  let els = base ? selectCssStep([root], base, !!ctx.element) : ctx.element ? [ctx.element] : [];
+  for (const step of parts.map((item) => item.trim()).filter(Boolean)) {
+    els = selectCssStep(els, step, false);
   }
 
-  // ---- 2. 顺序执行管道链 ----
-  for (const rawStep of chain) {
-    if (!els.length) break;
-    let step = rawStep;
-
-    // 先提取选择器（tag名/.class/#id/[attr]），如果 step 不以 ! 开头
-    let sel = '';
-    if (!step.startsWith('!')) {
-      if (step.startsWith('tag.')) {
-        // tag.tagname → 按标签名取子元素
-        const tm = step.match(/^tag\.([\w-]+)/);
-        if (tm) { sel = tm[1]; step = step.slice(tm[0].length); }
-      } else if (/^[.#\[]/.test(step)) {
-        // .class / #id / [attr] → CSS 选择器，取子元素
-        const m = step.match(/^([.#\[]([\w-]+|\w+="[^"]*"|[\w-]+='[^']*'|[\w-]+=[\w-]+)\])/);
-        if (m) { sel = m[1]; step = step.slice(m[0].length); }
-      } else {
-        // 裸标签名
-        const tm = step.match(/^([\w-]+)/);
-        if (tm) { sel = tm[1]; step = step.slice(tm[0].length); }
-      }
-    }
-
-    // 应用 tag/selector 转换：把每个元素替换为其子元素
-    if (sel) {
-      if (sel === 'tag') {
-        els = els.map((el) => el.firstElementChild).filter((el): el is Element => el !== null);
-      } else {
-        els = els.flatMap((el) => Array.from(el.querySelectorAll(sel)));
-      }
-    }
-
-    // 索引器：.N 取第 N 个（0-based），.-N 取倒数第 N 个
-    const im = step.match(/^\.(-?\d+)/);
-    if (im) {
-      let idx = parseInt(im[1], 10);
-      if (idx < 0) idx = els.length + idx;
-      const el = els[idx];
-      els = el ? [el] : [];
-      step = step.slice(im[0].length);
-    }
-
-    // 再应用过滤器：!N 跳过前 N 个，!-N 跳过后 N 个
-    const fm = step.match(/^!(-?\d+)/);
-    if (fm) {
-      const n = parseInt(fm[1], 10);
-      els = n < 0 ? els.slice(0, els.length + n) : els.slice(n);
-    }
-  }
-
-  // ---- 3. 输出 ----
   if (asList && !attr) return els;
   return els.map((el) => extractAttr(el, attr, ctx.baseUrl));
+}
+
+type CssRoot = (Document & ParentNode) | (Element & ParentNode);
+
+function selectCssStep(roots: CssRoot[], rawStep: string, includeSelf: boolean): Element[] {
+  let step = rawStep.trim();
+  let reverse = false;
+  if (step.startsWith('-') && !/^-(?:\d|:)/.test(step)) {
+    reverse = true;
+    step = step.slice(1).trim();
+  }
+
+  const childIndex = step.match(/^(?:children)?\.(-?\d+)$/i);
+  if (childIndex) {
+    const children = roots.flatMap((root) => Array.from(root.children ?? []));
+    const selected = pickIndex(children, Number(childIndex[1]));
+    return reverse ? selected.reverse() : selected;
+  }
+  if (/^children(?:\[[^\]]+\])?$/i.test(step)) {
+    const modifier = step.slice('children'.length);
+    const children = roots.flatMap((root) => Array.from(root.children ?? []));
+    const selected = applyPositionModifier(children, modifier);
+    return reverse ? selected.reverse() : selected;
+  }
+
+  let selector = step;
+  let modifier = '';
+  let containsText = '';
+  const legacy = step.match(/^(class|id|tag|text)\.([^.!\[]+)(.*)$/i);
+  if (legacy) {
+    const kind = legacy[1].toLowerCase();
+    const name = legacy[2];
+    modifier = legacy[3] || '';
+    selector = kind === 'class' ? `.${name}` : kind === 'id' ? `#${name}` : kind === 'tag' ? name : '*';
+    if (kind === 'text') containsText = name;
+  } else {
+    const trailing = step.match(/^(.*?)(![-\d:,]+|\[(?:!?[-\d:,\s]+)\])$/);
+    if (trailing && trailing[1]) {
+      selector = trailing[1];
+      modifier = trailing[2];
+    }
+  }
+
+  let selected: Element[] = [];
+  for (const root of roots) {
+    selected.push(...querySelectorAllCompat(root, selector));
+    if (includeSelf && root instanceof Element && !/:\s*(?:eq|lt|gt|first|last)\b/i.test(selector)) {
+      try { if (root.matches(selector)) selected.unshift(root); } catch { /* invalid selector */ }
+    }
+  }
+  selected = uniqueElements(selected);
+  if (containsText) selected = selected.filter((el) => (el.textContent || '').includes(containsText));
+  selected = applyPositionModifier(selected, modifier);
+  return reverse ? selected.reverse() : selected;
+}
+
+function querySelectorAllCompat(root: CssRoot, selector: string): Element[] {
+  const out: Element[] = [];
+  for (const group of splitCssGroups(selector)) {
+    out.push(...queryCssGroup(root, group));
+  }
+  return uniqueElements(out);
+}
+
+function queryCssGroup(root: CssRoot, input: string): Element[] {
+  let group = input.trim().replace(/:first(?![-\w(])/gi, ':eq(0)').replace(/:last(?![-\w(])/gi, ':eq(-1)');
+  const positional = group.match(/:(eq|lt|gt)\(\s*(-?\d+)\s*\)/i);
+  if (!positional || positional.index === undefined) {
+    try { return Array.from(root.querySelectorAll(group)); } catch { return []; }
+  }
+
+  const before = group.slice(0, positional.index).trim() || '*';
+  const after = group.slice(positional.index + positional[0].length).trim();
+  let candidates: Element[];
+  try { candidates = Array.from(root.querySelectorAll(before)); } catch { return []; }
+  const rawIndex = Number(positional[2]);
+  const index = rawIndex < 0 ? candidates.length + rawIndex : rawIndex;
+  let chosen: Element[];
+  switch (positional[1].toLowerCase()) {
+    case 'lt': chosen = candidates.slice(0, Math.max(0, index)); break;
+    case 'gt': chosen = candidates.slice(Math.min(candidates.length, index + 1)); break;
+    default: chosen = candidates[index] ? [candidates[index]] : [];
+  }
+  if (!after) return chosen;
+  return chosen.flatMap((element) => {
+    const descendant = /^[>+~]/.test(after) ? `:scope ${after}` : after;
+    try { return Array.from(element.querySelectorAll(descendant)); } catch { return []; }
+  });
+}
+
+function splitCssGroups(selector: string): string[] {
+  const groups: string[] = [];
+  let current = '';
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < selector.length; i++) {
+    const char = selector[i];
+    if (quote) {
+      current += char;
+      if (char === quote && selector[i - 1] !== '\\') quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") quote = char;
+    if (char === '[' || char === '(') depth++;
+    if (char === ']' || char === ')') depth--;
+    if (char === ',' && depth === 0) {
+      if (current.trim()) groups.push(current.trim());
+      current = '';
+    } else current += char;
+  }
+  if (current.trim()) groups.push(current.trim());
+  return groups;
+}
+
+function applyPositionModifier(items: Element[], modifier: string): Element[] {
+  if (!modifier) return items;
+  const single = modifier.match(/^\.(-?\d+)$/);
+  if (single) return pickIndex(items, Number(single[1]));
+
+  const bracket = modifier.match(/^\[([^\]]+)\]$/);
+  if (bracket) {
+    const spec = bracket[1].trim();
+    if (spec === '-1:0') return [...items].reverse();
+    if (spec.startsWith('!')) return excludePositions(items, spec.slice(1));
+    return selectPositions(items, spec);
+  }
+  if (modifier.startsWith('!')) return excludePositions(items, modifier.slice(1));
+  return items;
+}
+
+function pickIndex(items: Element[], raw: number): Element[] {
+  const index = raw < 0 ? items.length + raw : raw;
+  return items[index] ? [items[index]] : [];
+}
+
+function excludePositions(items: Element[], spec: string): Element[] {
+  const excluded = new Set(spec.split(/[:,]/).filter(Boolean).map(Number).map((index) => index < 0 ? items.length + index : index));
+  return items.filter((_, index) => !excluded.has(index));
+}
+
+function selectPositions(items: Element[], spec: string): Element[] {
+  const out: Element[] = [];
+  for (const part of spec.split(',').map((value) => value.trim()).filter(Boolean)) {
+    if (!part.includes(':')) {
+      out.push(...pickIndex(items, Number(part)));
+      continue;
+    }
+    const values = part.split(':');
+    let start = values[0] === '' ? 0 : Number(values[0]);
+    let end = values[1] === '' ? items.length : Number(values[1]);
+    let stride = values[2] === undefined || values[2] === '' ? (start <= end ? 1 : -1) : Number(values[2]);
+    if (!stride) continue;
+    if (start < 0) start += items.length;
+    if (end < 0) end += items.length;
+    if (stride > 0) for (let i = start; i < Math.min(end, items.length); i += stride) out.push(...pickIndex(items, i));
+    else for (let i = start; i > Math.max(end, -1); i += stride) out.push(...pickIndex(items, i));
+  }
+  return uniqueElements(out);
+}
+
+function uniqueElements(items: Element[]): Element[] {
+  return [...new Set(items)];
+}
+
+function regexListEval(expr: string, ctx: RuleCtx, asList: boolean): unknown[] {
+  const reverse = expr.startsWith('-:');
+  const pattern = expr.slice(reverse ? 2 : 1);
+  const input = ctx.raw ?? ctx.text ?? ctx.element?.outerHTML ?? '';
+  try {
+    const regex = new RegExp(pattern, 'gs');
+    const matches = [...input.matchAll(regex)].map((match) => ({
+      __legadoRegex: true,
+      text: match[0],
+      captures: Array.from(match, (value) => value ?? ''),
+    }));
+    if (reverse) matches.reverse();
+    if (asList) return matches;
+    return matches.length ? [matches[0].text] : [];
+  } catch {
+    return [];
+  }
 }
 
 function xpathEval(expr: string, ctx: RuleCtx, asList: boolean): unknown[] {
   const doc = ctx.doc ?? ctx.element?.ownerDocument;
   if (!doc) return [];
   try {
-    const snap = doc.evaluate(
-      expr,
-      ctx.element ?? doc,
-      null,
-      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-      null,
-    );
+    const scoped = ctx.element && expr.startsWith('//') ? `.${expr}` : expr;
+    const snap = doc.evaluate(scoped, ctx.element ?? doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
     const nodes: Node[] = [];
     for (let i = 0; i < snap.snapshotLength; i++) {
-      const n = snap.snapshotItem(i);
-      if (n) nodes.push(n);
+      const node = snap.snapshotItem(i);
+      if (node) nodes.push(node);
     }
     if (asList) return nodes;
-    return nodes.map((n) => {
-      if (n.nodeType === Node.ATTRIBUTE_NODE) return resolveMaybeUrl((n as Attr).value, ctx.baseUrl);
-      return (n.textContent || '').trim();
+    return nodes.map((node) => {
+      if (node.nodeType === Node.ATTRIBUTE_NODE) {
+        const attr = node as Attr;
+        return /^(href|src)$/i.test(attr.name) ? resolveMaybeUrl(attr.value, ctx.baseUrl) : attr.value.trim();
+      }
+      return (node.textContent || '').trim();
     });
   } catch {
     return [];
   }
 }
-
 /** 从元素上取值：text/ownText/html/href/src/任意属性 */
 function extractAttr(el: Element, attr: string, baseUrl: string): string {
   switch (attr) {
@@ -311,6 +450,9 @@ function extractAttr(el: Element, attr: string, baseUrl: string): string {
     }
     case 'html':
       return el.innerHTML.trim();
+    case 'outerHtml':
+    case 'all':
+      return el.outerHTML.trim();
     case 'textNodes':
       return htmlToText(el.innerHTML);
     default: {
@@ -331,15 +473,39 @@ function resolveMaybeUrl(v: string, baseUrl: string): string {
 
 /** JS 规则执行环境 */
 async function runJs(code: string, ctx: RuleCtx): Promise<unknown> {
-  const result = ctx.text ?? ctx.element?.outerHTML ?? (ctx.json !== undefined ? JSON.stringify(ctx.json) : '');
+  const result = ctx.text ?? ctx.element?.outerHTML ?? (ctx.json !== undefined ? JSON.stringify(ctx.json) : ctx.raw ?? '');
   const source = ctx.source ?? {};
   const host = (() => { try { return new URL(ctx.baseUrl).host; } catch { return ''; } })();
   const getServerHost = () => {
     try { const u = new URL(ctx.baseUrl); return `${u.protocol}//${u.host}`; } catch { return ctx.baseUrl; }
   };
   const _vars = new Map<string, string>();
+  let inheritedHeaders: Record<string, string> = {};
+  if (source.header && typeof source.header === 'object') {
+    inheritedHeaders = Object.fromEntries(Object.entries(source.header as Record<string, unknown>).map(([key, value]) => [key, String(value)]));
+  } else if (typeof source.header === 'string') {
+    try {
+      const parsed = JSON.parse(source.header);
+      if (parsed && typeof parsed === 'object') inheritedHeaders = Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value)]));
+    } catch { /* invalid header is ignored */ }
+  }
+  const request = (rawUrl: string, method?: string, body?: string, headers: Record<string, string> = {}) => {
+    const parsed = parseUrlWithOptions(String(rawUrl), { key: ctx.key, page: ctx.page });
+    return fetchText(resolveUrl(parsed.url, ctx.baseUrl), {
+      method: method ?? parsed.method,
+      body: body ?? parsed.body,
+      charset: parsed.charset,
+      headers: { ...inheritedHeaders, Referer: ctx.baseUrl, ...parsed.headers, ...headers },
+      signal: ctx.signal,
+    });
+  };
   const java = {
-    ajax: (url: string) => fetchText(resolveUrl(url, ctx.baseUrl), { headers: { Referer: ctx.baseUrl }, signal: ctx.signal }),
+    ajax: (url: string) => request(url),
+    get: (value: string, headers?: Record<string, string>) =>
+      headers || !_vars.has(String(value))
+        ? request(value, 'GET', undefined, headers)
+        : _vars.get(String(value)) ?? '',
+    post: (url: string, body: string, headers: Record<string, string> = {}) => request(url, 'POST', String(body ?? ''), headers),
     base64Decoder: (s: string) => atob(s),
     base64Decode: (s: string) => atob(s),
     base64Encode: (s: string) => btoa(String(s)),
@@ -348,7 +514,6 @@ async function runJs(code: string, ctx: RuleCtx): Promise<unknown> {
     longToast: (msg: string) => console.log('[java.longToast]', msg),
     toast: (msg: string) => console.log('[java.toast]', msg),
     put: (k: string, v: string) => { _vars.set(String(k), String(v)); },
-    get: (k: string) => _vars.get(String(k)) ?? '',
   };
   const sourceProxy = new Proxy(source as Record<string, unknown>, {
     get(target, prop) {
@@ -401,7 +566,7 @@ async function runJs(code: string, ctx: RuleCtx): Promise<unknown> {
     ctx.key ?? '',
     ctx.page ?? 1,
     java,
-    '',
+    inheritedHeaders.Cookie ?? inheritedHeaders.cookie ?? '',
     getServerHost,
     cache,
   );
@@ -422,7 +587,7 @@ function stripPutGet(rule: string): string {
 }
 
 /** 顶层分隔（忽略引号与括号内的分隔符） */
-function splitTop(rule: string, sep: '||' | '&&'): string[] {
+function splitTop(rule: string, sep: '||' | '&&' | '%%'): string[] {
   const out: string[] = [];
   let depth = 0;
   let quote = '';
@@ -456,6 +621,13 @@ function splitTop(rule: string, sep: '||' | '&&'): string[] {
 function applyReplace(text: string, replace: { regex: string; by: string }): string {
   try {
     return text.replace(new RegExp(replace.regex, 'g'), replace.by);
+  } catch {
+    return text;
+  }
+}
+function applyReplaceOnce(text: string, replace: { regex: string; by: string }): string {
+  try {
+    return text.replace(new RegExp(replace.regex), replace.by);
   } catch {
     return text;
   }

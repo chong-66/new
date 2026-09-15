@@ -92,7 +92,7 @@ async function searchSourceImpl(source: BookSource, key: string, signal: AbortSi
   const headers = { ...sourceHeaders(source), ...req.headers };
   const html = await fetchText(req.url, { method: req.method, headers, body: req.body, charset: req.charset, signal });
   const parsed = parseResponse(html);
-  const ctx: RuleCtx = { ...baseCtx(source, req.url), ...parsed, key, page: 1, signal };
+  const ctx: RuleCtx = { ...baseCtx(source, req.url), ...parsed, raw: html, key, page: 1, signal };
 
   const items = await evalRuleList(source.ruleSearch.bookList, ctx);
   const out: SearchResult[] = [];
@@ -230,7 +230,7 @@ async function getBookInfoImpl(source: BookSource, bookUrl: string, book: Book |
   if (!r) return {};
   const html = await fetchText(bookUrl, { headers: sourceHeaders(source), signal });
   const parsed = parseResponse(html);
-  const ctx: RuleCtx = { ...baseCtx(source, bookUrl), ...parsed, book: book as any, signal };
+  const ctx: RuleCtx = { ...baseCtx(source, bookUrl), ...parsed, raw: html, book: book as any, signal };
   if (r.init) {
     const initialized = await evalRule(r.init, ctx);
     if (initialized) Object.assign(ctx, { doc: undefined, json: undefined }, parseResponse(initialized));
@@ -272,7 +272,7 @@ async function getTocImpl(source: BookSource, book: Pick<Book, 'name' | 'bookUrl
     seen.add(url);
     const html = await fetchText(url, { headers: sourceHeaders(source), signal });
     const parsed = parseResponse(html);
-    const ctx: RuleCtx = { ...baseCtx(source, url, book.bookUrl), ...parsed, book: book as any, page: guard, signal };
+    const ctx: RuleCtx = { ...baseCtx(source, url, book.bookUrl), ...parsed, raw: html, book: book as any, page: guard, signal };
 
     let items = await evalRuleList(r.chapterList, ctx);
 
@@ -352,7 +352,7 @@ async function getContentImpl(source: BookSource, chapterUrl: string, book: Book
     seen.add(url);
     const html = await fetchText(url, { headers: sourceHeaders(source), signal: options.signal });
     const parsed = parseResponse(html);
-    const ctx: RuleCtx = { ...baseCtx(source, url, book?.bookUrl), ...parsed, book: book as any, page: guard, signal: options.signal };
+    const ctx: RuleCtx = { ...baseCtx(source, url, book?.bookUrl), ...parsed, raw: html, book: book as any, page: guard, signal: options.signal };
 
     let text = '';
     if (parsed.json !== undefined) {
@@ -414,14 +414,21 @@ async function getContentImpl(source: BookSource, chapterUrl: string, book: Book
 
 /** 列表项子规则的上下文：元素 -> element，JSON 对象 -> json */
 function childCtx(parent: RuleCtx, item: unknown): RuleCtx {
-  const ctx: RuleCtx = { ...parent, element: undefined, json: undefined, text: undefined };
+  const ctx: RuleCtx = { ...parent, element: undefined, json: undefined, text: undefined, captures: undefined };
   if (item instanceof Element) {
     ctx.element = item;
     ctx.doc = item.ownerDocument;
+    ctx.raw = item.outerHTML;
+  } else if (item !== null && typeof item === 'object' && (item as any).__legadoRegex === true) {
+    ctx.text = String((item as any).text ?? '');
+    ctx.raw = ctx.text;
+    ctx.captures = Array.isArray((item as any).captures) ? (item as any).captures.map(String) : [];
   } else if (item !== null && typeof item === 'object') {
     ctx.json = item;
+    ctx.raw = JSON.stringify(item);
   } else {
     ctx.text = String(item ?? '');
+    ctx.raw = ctx.text;
   }
   return ctx;
 }
