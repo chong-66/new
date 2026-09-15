@@ -81,19 +81,63 @@ export async function fetchText(url: string, opt: FetchOptions = {}): Promise<st
 async function fetchBytes(url: string, opt: FetchOptions) {
   if (!/^https?:\/\//i.test(url)) throw new Error('无效的网页地址');
   return withTimeout(async (signal) => {
-    const fetcher = isTauri ? (await import('@tauri-apps/plugin-http')).fetch : window.fetch.bind(window);
     signal.throwIfAborted();
-    const resp = await fetcher(url, {
-      method: opt.method || 'GET',
+    const method = (opt.method || 'GET').toUpperCase();
+    const requestInit = {
+      method,
       headers: { 'User-Agent': DEFAULT_UA, ...opt.headers },
       body: opt.body,
       signal,
-    });
-    if (!resp.ok) throw new Error(`服务器返回 HTTP ${resp.status}`);
+    };
+    const nativeFetch = isTauri ? (await import('@tauri-apps/plugin-http')).fetch : undefined;
+    let resp = nativeFetch
+      ? await nativeFetch(url, requestInit)
+      : await window.fetch(url, requestInit);
+
+    // 部分书站会短时拒绝代理出口或限制连续请求。只重试无副作用的读取请求。
+    if ((resp.status === 403 || resp.status === 429) && (method === 'GET' || method === 'HEAD')) {
+      const firstStatus = resp.status;
+      if (resp.body) await resp.body.cancel().catch(() => {});
+      await abortableDelay(retryDelay(resp.headers.get('retry-after'), firstStatus), signal);
+      try {
+        if (nativeFetch && firstStatus === 403) {
+          const host = new URL(url).hostname;
+          resp = await nativeFetch(url, {
+            ...requestInit,
+            connectTimeout: 5000,
+            // 添加显式代理会关闭 reqwest 的自动系统代理；目标域名在 noProxy 中直连。
+            proxy: { all: { url: 'http://127.0.0.1:9', noProxy: host } },
+          });
+        } else {
+          resp = nativeFetch
+            ? await nativeFetch(url, requestInit)
+            : await window.fetch(url, requestInit);
+        }
+      } catch {
+        throw new Error(`服务器返回 HTTP ${firstStatus}（自动重试失败）`);
+      }
+    }
+    if (!resp.ok) throw new Error(`服务器返回 HTTP ${resp.status}（重试后仍被拒绝）`);
     const buf = await resp.arrayBuffer();
     signal.throwIfAborted();
     return { buf, contentType: resp.headers.get('content-type') };
   }, opt.signal, opt.timeoutMs);
+}
+
+function retryDelay(value: string | null, status: number): number {
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(3000, Math.max(300, seconds * 1000));
+  return status === 429 ? 1200 : 600;
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  });
 }
 
 /** 抓取二进制（封面图），返回 Blob；带 Referer 防盗链 */

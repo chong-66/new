@@ -83,7 +83,7 @@ export function startChapterCacheTask(options: ChapterCacheTaskOptions): Chapter
           progress.processed++;
           consecutiveFailures = 0;
           report(chapter.url);
-          if (i < chapters.length - 1) await abortableDelay(options.delayMs ?? 300, controller.signal);
+          if (i < chapters.length - 1) await abortableDelay(options.delayMs ?? 800, controller.signal);
         } catch (error) {
           if (controller.signal.aborted) throw error;
           const message = error instanceof Error ? error.message : String(error);

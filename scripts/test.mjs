@@ -120,7 +120,20 @@ try {
     const controller = new AbortController(); controller.abort();
     await assert.rejects(http.fetchText('https://http.invalid/abort', { signal: controller.signal }), { name: 'AbortError' });
   });
-  await test('empty content is retried, successful cache is used, forced retry bypasses cache', async () => {
+  await test('GET requests retry one transient 403 while POST requests remain single-shot', async () => {
+    let calls = 0;
+    window.fetch = async () => {
+      calls++;
+      return calls === 1 ? new Response('Forbidden', { status: 403 }) : new Response('recovered');
+    };
+    assert.equal(await http.fetchText('https://http.invalid/transient'), 'recovered');
+    assert.equal(calls, 2);
+    calls = 0;
+    window.fetch = async () => { calls++; return new Response('Forbidden', { status: 403 }); };
+    await assert.rejects(http.fetchText('https://http.invalid/post', { method: 'POST', body: 'a=1' }), /403/);
+    assert.equal(calls, 1);
+  });
+await test('empty content is retried, successful cache is used, forced retry bypasses cache', async () => {
     let requests = 0;
     window.fetch = async () => { requests++; return new Response(requests === 1 ? '<div></div>' : `<div id="body">text ${requests}</div>`); };
     const s = source('retry');
