@@ -1,6 +1,6 @@
 {
   "name": "toudu",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "透读 - 透明背景的极简桌面小说阅读器，兼容阅读3.0书源",
